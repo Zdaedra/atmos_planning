@@ -1,0 +1,96 @@
+version: "3.8"
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: atmos_db
+    environment:
+      POSTGRES_USER: atmos
+      POSTGRES_PASSWORD: atmos_password
+      POSTGRES_DB: atmos_db
+    ports:
+      - "4432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: atmos_redis
+    ports:
+      - "4379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    container_name: atmos_minio
+    environment:
+      MINIO_ROOT_USER: atmos_admin
+      MINIO_ROOT_PASSWORD: atmos_minio_password
+    command: server /data --console-address ":4001"
+    ports:
+      - "4000:9000"
+      - "4001:4001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: atmos_backend
+    ports:
+      - "4080:8000"
+    environment:
+      DATABASE_URL: postgresql://atmos:atmos_password@db:5432/atmos_db
+      REDIS_URL: redis://redis:6379/
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+
+  ai_monitor:
+    build: ./ai_monitor
+    container_name: atmos_ai_monitor
+    environment:
+      API_BASE_URL: http://backend:8000
+      POLL_INTERVAL: 60
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  frontend:
+    build: ./lovable_frontend
+    container_name: atmos_frontend
+    ports:
+      - "4002:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  supervisor_frontend:
+    build: ./frontend
+    container_name: atmos_supervisor_frontend
+    ports:
+      - "4003:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  button_bot:
+    build: ./button_bot
+    container_name: atmos_button_bot
+    ports:
+      - "4081:8000"
+    volumes:
+      - ./button_bot:/app
+    environment:
+      FRONTEND_URL: http://frontend:80
+    depends_on:
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
