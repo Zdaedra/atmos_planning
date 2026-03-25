@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Calendar } from "@/components/ui/calendar";
 import { format, parseISO, addDays, addMonths, isBefore } from "date-fns";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchAllTasks, fetchTaskTemplates } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Plus, Clock, Pencil, CheckCircle2 } from "lucide-react";
+import { Plus, Clock, Pencil, CheckCircle2, CalendarCheck, XCircle } from "lucide-react";
 import TaskFormModal from "@/components/TaskFormModal";
 import { UserBadge } from "@/components/UserBadge";
 import { Badge } from "@/components/ui/badge";
@@ -31,10 +31,13 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 export default function CalendarPage() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
-  const [openAccordions, setOpenAccordions] = useState<string[]>(["planned", "project"]);
   const [taskCreationMode, setTaskCreationMode] = useState<"existing" | "new">("existing");
   const [selectedUnassignedTask, setSelectedUnassignedTask] = useState<string>("");
   const [assignTpls, setAssignTpls] = useState<string[]>([]);
@@ -50,64 +53,37 @@ export default function CalendarPage() {
     queryFn: fetchTaskTemplates
   });
 
-  // Group fetched templates and tasks by 'next_execution_date' / 'scheduled_date'
-  const calendarTasks: Record<string, any[]> = {};
-
-  // 1. Map real, generated historical/active tasks first
-  allTasks.forEach((task: any) => {
-    if (task.scheduled_date && task.template) {
-      const parsedDate = new Date(task.scheduled_date);
-      const dateKey = format(parsedDate, "yyyy-MM-dd");
-      if (!calendarTasks[dateKey]) calendarTasks[dateKey] = [];
-
-      calendarTasks[dateKey].push({
-        ...task.template,
-        id: task.template_id, // For TaskFormModal to edit the template rule
-        task_id: task.id,
-        time: task.template.time_of_day || "Anytime",
-        tag: task.template.repeat_type || "unknown",
-        status: task.status,
-        is_real: true
-      });
+  const { data: calendarMap = {} } = useQuery({
+    queryKey: ['adminCalendar'],
+    queryFn: async () => {
+      const startD = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toISOString().split('T')[0];
+      const endD = new Date(new Date().getFullYear(), new Date().getMonth() + 2, 0).toISOString().split('T')[0];
+      const res = await fetch(`https://api.trypranaextract.com/tasks/calendar?start_date=${startD}&end_date=${endD}`);
+      if (!res.ok) return {};
+      return res.json();
     }
   });
 
-  const MAX_PROJECTION_MONTHS = 6;
-  const projectionLimit = addMonths(new Date(), MAX_PROJECTION_MONTHS);
-
-  // 2. Project templates mathematically into the future
-  templates.forEach((t: any) => {
-    if (t.next_execution_date && t.repeat_type !== "daily") {
-      let currentDate = new Date(t.next_execution_date);
-
-      while (isBefore(currentDate, projectionLimit)) {
-        const dateKey = format(currentDate, "yyyy-MM-dd");
-        if (!calendarTasks[dateKey]) calendarTasks[dateKey] = [];
-
-        // Skip projecting this template on this date if a real task already covers it
-        const hasRealTask = calendarTasks[dateKey].some(ct => ct.is_real && ct.id === t.id);
-
-        if (!hasRealTask) {
-          calendarTasks[dateKey].push({
-            ...t,
-            time: t.time_of_day || "Anytime",
-            tag: t.repeat_type || "unknown",
-            is_projected: true
-          });
-        }
-
-        if (t.repeat_type === 'weekly') {
-          currentDate = addDays(currentDate, 7);
-        } else if (t.repeat_type === 'biweekly' || t.repeat_type === 'bi-weekly') {
-          currentDate = addDays(currentDate, 14);
-        } else if (t.repeat_type === 'monthly') {
-          currentDate = addDays(currentDate, 28);
-        } else {
-          break; // Project or unknown don't repeat automatically
-        }
-      }
-    }
-  });
+  const calendarTasks = useMemo(() => {
+    if (!calendarMap) return {};
+    const mapped: Record<string, any[]> = {};
+    Object.keys(calendarMap).forEach(k => {
+      if (!Array.isArray(calendarMap[k])) return;
+      mapped[k] = calendarMap[k].map((t: any) => ({
+        ...t.template,
+        id: (t as any).template_id || (t as any).id,
+        task_id: t.is_projected ? undefined : t.id,
+        assigned_user: t.assigned_user,
+        default_assigned_user: t.template?.default_assigned_user,
+        time: t.template?.time_of_day || "Anytime",
+        tag: t.repeat_type || "unknown",
+        status: t.status,
+        is_real: !t.is_projected,
+        is_projected: t.is_projected
+      }));
+    });
+    return mapped;
+  }, [calendarMap]);
 
   const dateKey = format(selectedDate, "yyyy-MM-dd");
   const assignedTasks = calendarTasks[dateKey] || [];
@@ -121,17 +97,9 @@ export default function CalendarPage() {
     });
   };
 
-  const plannedTasks = sortTasksByTime(assignedTasks.filter(t => t.repeat_type !== 'project' && t.repeat_type?.toLowerCase() !== 'daily'));
-  const projectTasks = sortTasksByTime(assignedTasks.filter(t => t.repeat_type === 'project'));
-  const instantiatedDailyTasks = assignedTasks.filter(t => t.repeat_type?.toLowerCase() === 'daily');
-
-  const baseDailyTasks = templates.filter((t: any) => t.repeat_type?.toLowerCase() === 'daily').map((t: any) => ({
-    ...t,
-    time: t.time_of_day || "Anytime",
-    tag: t.repeat_type || "daily"
-  }));
-
-  const dailyTasks = sortTasksByTime([...instantiatedDailyTasks, ...baseDailyTasks.filter((bdt: any) => !instantiatedDailyTasks.some((idt: any) => idt.id === bdt.id))]);
+  const plannedTasks = sortTasksByTime(assignedTasks.filter(t => (t.repeat_type || "").toLowerCase() !== 'project' && (t.repeat_type || "").toLowerCase() !== 'daily'));
+  const projectTasks = sortTasksByTime(assignedTasks.filter(t => (t.repeat_type || "").toLowerCase() === 'project'));
+  // Daily Tasks omitted from Calendar view per user requirements
 
   const repeatOrder: Record<string, number> = {
     weekly: 1,
@@ -150,12 +118,28 @@ export default function CalendarPage() {
     .map((t: any) => ({
       ...t,
       time: t.time_of_day || "Anytime",
-      tag: t.repeat_type || "unknown"
+      tag: (t.repeat_type || "unknown").toLowerCase()
+    }));
+
+  const scheduledTasks = templates
+    .filter((t: any) => t.next_execution_date && t.repeat_type !== "daily")
+    .sort((a: any, b: any) => {
+      const orderA = repeatOrder[a.repeat_type?.toLowerCase()] || 99;
+      const orderB = repeatOrder[b.repeat_type?.toLowerCase()] || 99;
+      return orderA - orderB;
+    })
+    .map((t: any) => ({
+      ...t,
+      time: t.time_of_day || "Anytime",
+      tag: (t.repeat_type || "unknown").toLowerCase()
     }));
 
   const taskCounts: Record<string, number> = {};
   Object.keys(calendarTasks).forEach(key => {
-    taskCounts[key] = calendarTasks[key].length;
+    const nonDailyTasks = calendarTasks[key].filter(t => (t.repeat_type || "").toLowerCase() !== 'daily');
+    if (nonDailyTasks.length > 0) {
+      taskCounts[key] = nonDailyTasks.length;
+    }
   });
 
   const highlightedDays = Object.keys(calendarTasks).map((d) => parseISO(d));
@@ -173,10 +157,6 @@ export default function CalendarPage() {
             onSelect={(d) => {
               if (d) {
                 setSelectedDate(d);
-                const toOpen = [...openAccordions];
-                if (!toOpen.includes("planned")) toOpen.push("planned");
-                if (!toOpen.includes("project")) toOpen.push("project");
-                setOpenAccordions(toOpen);
               }
             }}
             className="p-3 pointer-events-auto w-full"
@@ -191,50 +171,15 @@ export default function CalendarPage() {
           <h2 className="text-base font-semibold text-foreground mb-1">
             Schedule for {format(selectedDate, "EEE, MMM d")}
           </h2>
-          <p className="text-xs text-muted-foreground mb-4">{plannedTasks.length + projectTasks.length + dailyTasks.length} tasks scheduled</p>
+          <p className="text-xs text-muted-foreground mb-4">{plannedTasks.length + projectTasks.length} tasks scheduled</p>
 
           <div className="overflow-y-auto flex-1 pr-1">
             <Accordion
               type="multiple"
               className="w-full space-y-4"
-              value={openAccordions}
-              onValueChange={setOpenAccordions}
             >
 
-              {/* Daily Tasks */}
-              <AccordionItem value="daily" className="border-b-0">
-                <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-lg border">
-                  Daily Tasks ({dailyTasks.length})
-                </AccordionTrigger>
-                <AccordionContent className="border border-t-0 rounded-b-md p-0 overflow-visible">
-                  {dailyTasks.length === 0 ? (
-                    <p className="text-sm text-muted-foreground p-4 text-center">No daily tasks</p>
-                  ) : (
-                    <div className="divide-y divide-border">
-                      {dailyTasks.map((t, i) => (
-                        <div key={i} className="flex items-center gap-3 p-3 group">
-                          {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                            <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
-                          ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                            <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
-                          ) : <span className="w-14" />}
-                          <span className="text-sm font-medium text-foreground flex-1">{t.name}</span>
-                          <UserBadge userId={t.assigned_user || t.default_assigned_user} />
-                          <Badge variant="secondary" className="text-xs capitalize">{t.tag}</Badge>
-                          <TaskFormModal
-                            task={t}
-                            trigger={
-                              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity" title="Edit Task">
-                                <Pencil className="w-4 h-4" />
-                              </Button>
-                            }
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </AccordionContent>
-              </AccordionItem>
+
 
               {/* Planned Tasks */}
               <AccordionItem value="planned" className="border-b-0">
@@ -248,10 +193,10 @@ export default function CalendarPage() {
                     <div className="divide-y divide-border">
                       {plannedTasks.map((t, i) => (
                         <div key={i} className={`flex items-center gap-3 p-3 group ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
-                          {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                            <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
-                          ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                            <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
+                          {['1', 'morning', 'смена 1'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                            <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Shift 1</Badge>
+                          ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                            <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Shift 2</Badge>
                           ) : <span className="w-14" />}
                           {t.status === 'Completed' && (
                             <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
@@ -274,9 +219,30 @@ export default function CalendarPage() {
                             size="sm"
                             className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
                             onClick={() => {
-                              import('@/lib/api').then(m => m.unassignTask(t.id).then(() => {
-                                queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
-                              }))
+                              const token = localStorage.getItem('access_token');
+                              fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                                method: "PUT",
+                                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+                                body: JSON.stringify({
+                                  name: t.name,
+                                  description: t.description || "",
+                                  repeat_type: t.repeat_type,
+                                  time_of_day: t.time_of_day || "anytime",
+                                  zone_id: t.zone_id,
+                                  photo_required: t.photo_required,
+                                  next_execution_date: null
+                                })
+                              }).then(res => {
+                                if (res.ok) {
+                                  queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                                  queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
+                                } else {
+                                  alert("Failed to unassign task");
+                                }
+                              }).catch(err => {
+                                console.error(err);
+                                alert("Failed to unassign task");
+                              });
                             }}
                             title="Remove from schedule"
                           >
@@ -327,9 +293,30 @@ export default function CalendarPage() {
                             size="sm"
                             className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
                             onClick={() => {
-                              import('@/lib/api').then(m => m.unassignTask(t.id).then(() => {
-                                queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
-                              }))
+                              const token = localStorage.getItem('access_token');
+                              fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                                method: "PUT",
+                                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+                                body: JSON.stringify({
+                                  name: t.name,
+                                  description: t.description || "",
+                                  repeat_type: t.repeat_type,
+                                  time_of_day: t.time_of_day || "anytime",
+                                  zone_id: t.zone_id,
+                                  photo_required: t.photo_required,
+                                  next_execution_date: null
+                                })
+                              }).then(res => {
+                                if (res.ok) {
+                                  queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                                  queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
+                                } else {
+                                  alert("Failed to unassign task");
+                                }
+                              }).catch(err => {
+                                console.error(err);
+                                alert("Failed to unassign task");
+                              });
                             }}
                             title="Remove from schedule"
                           >
@@ -356,7 +343,7 @@ export default function CalendarPage() {
             <DialogTrigger asChild>
               <Button variant="outline" className="w-full mt-4 border-primary text-primary hover:bg-primary/5">
                 <Plus className="w-4 h-4 mr-2" />
-                Add Project Task for this Day
+                Add Custom Task for this Day
               </Button>
             </DialogTrigger>
             <DialogContent className="animate-modal-in">
@@ -419,7 +406,7 @@ export default function CalendarPage() {
                         next_execution_date: new Date(format(selectedDate, 'yyyy-MM-dd') + "T00:00:00").toISOString()
                       };
 
-                      fetch(`http://89.167.122.76:4080/tasks/templates/${taskToAssign.id}`, {
+                      fetch(`https://api.trypranaextract.com/tasks/templates/${taskToAssign.id}`, {
                         method: "PUT",
                         headers: {
                           "Content-Type": "application/json",
@@ -429,6 +416,7 @@ export default function CalendarPage() {
                       }).then(r => {
                         if (r.ok) {
                           queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                          queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
                           document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
                         } else {
                           alert("Failed to assign task");
@@ -500,7 +488,7 @@ export default function CalendarPage() {
                         next_execution_date: new Date(format(selectedDate, 'yyyy-MM-dd') + "T00:00:00").toISOString()
                       };
 
-                      fetch("http://89.167.122.76:4080/tasks/templates/", {
+                      fetch("https://api.trypranaextract.com/tasks/templates/", {
                         method: "POST",
                         headers: {
                           "Content-Type": "application/json",
@@ -510,6 +498,7 @@ export default function CalendarPage() {
                       }).then(r => {
                         if (r.ok) {
                           queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                          queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
                           document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
                         } else {
                           alert("Failed to create task");
@@ -527,25 +516,53 @@ export default function CalendarPage() {
       </div>
 
       {/* Unassigned tasks via Accordions */}
-      <div className="card-atmos">
-        <div className="flex items-center gap-2 mb-4">
-          <Clock className="w-4 h-4 text-muted-foreground" />
-          <h3 className="text-base font-semibold text-foreground">Unassigned Tasks</h3>
-        </div>
-
-        {unassignedTasks.length > 0 && (
-          <div className="mb-4 pb-4 border-b flex justify-end gap-3 w-full items-center">
+      {/* Global Template Management */}
+      <div className="w-full">
+        {assignTpls.length > 0 && (
+          <div className="sticky top-0 z-50 bg-background/95 backdrop-blur-md pt-4 pb-4 mb-6 border-b flex flex-wrap justify-end gap-3 w-full items-center shadow-sm rounded-lg px-4 border">
             <span className="text-sm text-muted-foreground mr-auto">
               <strong>{assignTpls.length}</strong> tasks selected.
             </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-destructive/50 text-destructive hover:bg-destructive/10"
+              onClick={async () => {
+                const token = localStorage.getItem('access_token');
+                const promises = assignTpls.map(tplId => {
+                  const t = templates.find((ut: any) => ut.id.toString() === tplId);
+                  if (!t) return Promise.resolve();
+                  return fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+                    body: JSON.stringify({
+                      name: t.name,
+                      description: t.description || "",
+                      repeat_type: t.repeat_type,
+                      time_of_day: t.time_of_day || "anytime",
+                      zone_id: t.zone_id,
+                      photo_required: t.photo_required,
+                      next_execution_date: null
+                    })
+                  });
+                });
+                await Promise.all(promises);
+                queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
+                setAssignTpls([]);
+              }}
+            >
+              <XCircle className="w-4 h-4 mr-2" />
+              Unschedule Selected
+            </Button>
             <Button
               size="sm"
               onClick={async () => {
                 const token = localStorage.getItem('access_token');
                 const promises = assignTpls.map(tplId => {
-                  const t = unassignedTasks.find((ut: any) => ut.id.toString() === tplId);
+                  const t = templates.find((ut: any) => ut.id.toString() === tplId);
                   if (!t) return Promise.resolve();
-                  return fetch(`http://89.167.122.76:4080/tasks/templates/${t.id}`, {
+                  return fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                     body: JSON.stringify({
@@ -561,181 +578,186 @@ export default function CalendarPage() {
                 });
                 await Promise.all(promises);
                 queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
                 setAssignTpls([]);
-                if (!openAccordions.includes("assigned")) {
-                  setOpenAccordions([...openAccordions, "assigned"]);
-                }
               }}
-              disabled={assignTpls.length === 0}
             >
-              <Plus className="w-4 h-4 mr-2" />
-              Assign Selected to {format(selectedDate, "MMM d")}
+              Assign Selected
             </Button>
           </div>
         )}
 
-        {unassignedTasks.length === 0 ? (
-          <p className="text-sm text-muted-foreground">All tasks have been scheduled.</p>
-        ) : (
-          <Accordion type="multiple" className="space-y-3 w-full">
-            {["project", "weekly", "biweekly", "monthly"].map(tagType => {
-              const typeTasks = sortTasksByTime(unassignedTasks.filter((t: any) => t.tag === tagType));
-              if (typeTasks.length === 0) return null;
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+          {/* Unscheduled Tasks */}
+          <div className="card-atmos">
+            <div className="flex items-center gap-2 mb-4">
+              <Clock className="w-4 h-4 text-muted-foreground" />
+              <h3 className="text-base font-semibold text-foreground">Unscheduled Tasks</h3>
+            </div>
 
-              return (
-                <AccordionItem key={tagType} value={tagType} className="border-b-0">
-                  <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-sm border hover:bg-muted/50 transition-colors">
-                    <div className="flex gap-2 items-center">
-                      <span className="capitalize">{tagType}</span>
-                      <Badge variant="secondary" className="ml-2">{typeTasks.length}</Badge>
-                    </div>
-                  </AccordionTrigger>
-                  <AccordionContent className="border border-t-0 rounded-b-md p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 bg-card overflow-visible">
-                    {typeTasks.map((t: any) => (
-                      <div key={t.id}
-                        onClick={() => setAssignTpls(prev => prev.includes(t.id.toString()) ? prev.filter(id => id !== t.id.toString()) : [...prev, t.id.toString()])}
-                        className={`border rounded p-3 flex items-center gap-3 group cursor-pointer transition-all ${assignTpls.includes(t.id.toString()) ? 'border-primary bg-primary/5 ring-1 ring-primary shadow-sm' : 'border-border hover:border-primary/50'}`}>
-                        <Checkbox className="mt-0.5 pointer-events-none" checked={assignTpls.includes(t.id.toString())} />
-                        {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                          <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
-                        ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                          <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
-                        ) : <Badge variant="secondary" className="text-[10px] w-[86px] justify-center text-muted-foreground bg-muted/30">Anytime</Badge>}
-                        <span className="text-sm font-medium text-foreground flex-1 truncate">{t.name}</span>
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity ml-auto" onClick={e => e.stopPropagation()}>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-primary flex-shrink-0"
-                            title="Assign to Selected Date"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const payload = {
-                                name: t.name,
-                                description: t.description || "",
-                                repeat_type: t.repeat_type,
-                                time_of_day: t.time_of_day || "anytime",
-                                zone_id: t.zone_id,
-                                photo_required: t.photo_required,
-                                next_execution_date: new Date(format(selectedDate, 'yyyy-MM-dd') + "T00:00:00").toISOString()
-                              };
-                              fetch(`http://89.167.122.76:4080/tasks/templates/${t.id}`, {
-                                method: "PUT",
-                                headers: {
-                                  "Content-Type": "application/json",
-                                  "Authorization": `Bearer ${localStorage.getItem('access_token')}`
-                                },
-                                body: JSON.stringify(payload)
-                              }).then(r => {
-                                if (r.ok) {
-                                  queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
-                                  if (!openAccordions.includes("assigned")) {
-                                    setOpenAccordions([...openAccordions, "assigned"]);
-                                  }
-                                } else {
-                                  alert("Failed to assign task");
-                                }
-                              });
-                            }}
-                          >
-                            <Plus className="w-4 h-4" />
-                          </Button>
-                          <TaskFormModal
-                            task={t}
-                            trigger={
-                              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-primary" title="Edit Task">
-                                <Pencil className="w-4 h-4" />
-                              </Button>
-                            }
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </AccordionContent>
-                </AccordionItem>
-              );
-            })}
+            {unassignedTasks.length === 0 ? (
+              <p className="text-sm text-muted-foreground">All tasks have been scheduled.</p>
+            ) : (
+              <Accordion type="multiple" className="space-y-3 w-full">
+                {["project", "weekly", "biweekly", "monthly"].map(tagType => {
+                  const typeTasks = sortTasksByTime(unassignedTasks.filter((t: any) => t.tag === tagType));
+                  if (typeTasks.length === 0) return null;
 
-            {/* Catch-all for unknown tags */}
-            {(() => {
-              const otherTasks = sortTasksByTime(unassignedTasks.filter((t: any) => !["project", "weekly", "biweekly", "monthly"].includes(t.tag)));
-              if (otherTasks.length === 0) return null;
-              return (
-                <AccordionItem value="other" className="border-b-0">
-                  <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-sm border hover:bg-muted/50 transition-colors">
-                    <div className="flex gap-2 items-center">
-                      <span>Other</span>
-                      <Badge variant="secondary" className="ml-2">{otherTasks.length}</Badge>
-                    </div>
-                  </AccordionTrigger>
-                  <AccordionContent className="border border-t-0 rounded-b-md p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 bg-card overflow-visible">
-                    {otherTasks.map((t: any) => (
-                      <div key={t.id}
-                        onClick={() => setAssignTpls(prev => prev.includes(t.id.toString()) ? prev.filter(id => id !== t.id.toString()) : [...prev, t.id.toString()])}
-                        className={`border rounded p-3 flex items-center gap-3 group cursor-pointer transition-all ${assignTpls.includes(t.id.toString()) ? 'border-primary bg-primary/5 ring-1 ring-primary shadow-sm' : 'border-border hover:border-primary/50'}`}>
-                        <Checkbox className="mt-0.5 pointer-events-none" checked={assignTpls.includes(t.id.toString())} />
-                        {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                          <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
-                        ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                          <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
-                        ) : <Badge variant="secondary" className="text-[10px] w-[86px] justify-center text-muted-foreground bg-muted/30">Anytime</Badge>}
-                        <span className="text-sm font-medium text-foreground flex-1 truncate">{t.name}</span>
-                        <Badge variant="outline" className="text-[10px] hidden sm:inline-flex">{t.tag}</Badge>
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity ml-auto" onClick={e => e.stopPropagation()}>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-primary flex-shrink-0"
-                            title="Assign to Selected Date"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const payload = {
-                                name: t.name,
-                                description: t.description || "",
-                                repeat_type: t.repeat_type,
-                                time_of_day: t.time_of_day || "anytime",
-                                zone_id: t.zone_id,
-                                photo_required: t.photo_required,
-                                next_execution_date: new Date(format(selectedDate, 'yyyy-MM-dd') + "T00:00:00").toISOString()
-                              };
-                              fetch(`http://89.167.122.76:4080/tasks/templates/${t.id}`, {
-                                method: "PUT",
-                                headers: {
-                                  "Content-Type": "application/json",
-                                  "Authorization": `Bearer ${localStorage.getItem('access_token')}`
-                                },
-                                body: JSON.stringify(payload)
-                              }).then(r => {
-                                if (r.ok) {
-                                  queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
-                                  if (!openAccordions.includes("assigned")) {
-                                    setOpenAccordions([...openAccordions, "assigned"]);
-                                  }
-                                } else {
-                                  alert("Failed to assign task");
-                                }
-                              });
-                            }}
-                          >
-                            <Plus className="w-4 h-4" />
-                          </Button>
-                          <TaskFormModal
-                            task={t}
-                            trigger={
-                              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-primary" title="Edit Task">
-                                <Pencil className="w-4 h-4" />
-                              </Button>
-                            }
-                          />
+                  return (
+                    <AccordionItem key={`unsched-${tagType}`} value={tagType} className="border-b-0">
+                      <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-sm border hover:bg-muted/50 transition-colors">
+                        <div className="flex gap-2 items-center">
+                          <span className="capitalize">{tagType}</span>
+                          <Badge variant="secondary" className="ml-2">{typeTasks.length}</Badge>
                         </div>
-                      </div>
-                    ))}
-                  </AccordionContent>
-                </AccordionItem>
-              );
-            })()}
-          </Accordion>
-        )}
+                      </AccordionTrigger>
+                      <AccordionContent className="border border-t-0 rounded-b-md p-4 grid grid-cols-1 lg:grid-cols-2 gap-3 bg-card overflow-visible">
+                        {typeTasks.map((t: any) => (
+                          <div key={t.id}
+                            onClick={() => setAssignTpls(prev => prev.includes(t.id.toString()) ? prev.filter(id => id !== t.id.toString()) : [...prev, t.id.toString()])}
+                            className={`border rounded p-3 flex flex-col gap-2 group cursor-pointer transition-all relative ${assignTpls.includes(t.id.toString()) ? 'border-primary bg-primary/5 ring-1 ring-primary shadow-sm' : 'border-border hover:border-primary/50'}`}>
+
+                            <div className="flex items-start gap-3 w-full">
+                              <Checkbox className="mt-0.5 pointer-events-none" checked={assignTpls.includes(t.id.toString())} />
+                              <div className="flex-1 min-w-0">
+                                <span className="text-sm font-medium text-foreground block truncate" title={t.name}>{t.name}</span>
+                                <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                                  {['1', 'morning', 'смена 1'].includes((t.time_of_day || 'anytime').toLowerCase()) ? (
+                                    <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] whitespace-nowrap">Shift 1</Badge>
+                                  ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || 'anytime').toLowerCase()) ? (
+                                    <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] whitespace-nowrap">Shift 2</Badge>
+                                  ) : <Badge variant="secondary" className="text-[10px] text-muted-foreground bg-muted/30 whitespace-nowrap">Anytime</Badge>}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity flex bg-background/80 backdrop-blur-sm rounded-md shadow-sm border px-1" onClick={e => e.stopPropagation()}>
+                              <TaskFormModal
+                                task={t}
+                                trigger={
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-primary" title="Edit Task">
+                                    <Pencil className="w-3 h-3" />
+                                  </Button>
+                                }
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </AccordionContent>
+                    </AccordionItem>
+                  );
+                })}
+              </Accordion>
+            )}
+          </div>
+
+          {/* Scheduled Tasks */}
+          <div className="card-atmos">
+            <div className="flex items-center gap-2 mb-4">
+              <CalendarCheck className="w-4 h-4 text-primary" />
+              <h3 className="text-base font-semibold text-foreground">Scheduled Tasks</h3>
+            </div>
+
+            {scheduledTasks.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No tasks are currently scheduled globally.</p>
+            ) : (
+              <Accordion type="multiple" className="space-y-3 w-full">
+                {["project", "weekly", "biweekly", "monthly"].map(tagType => {
+                  const typeTasks = sortTasksByTime(scheduledTasks.filter((t: any) => t.tag === tagType));
+                  if (typeTasks.length === 0) return null;
+
+                  return (
+                    <AccordionItem key={`sched-${tagType}`} value={tagType} className="border-b-0">
+                      <AccordionTrigger className="bg-primary/5 px-4 rounded-t-md hover:no-underline font-semibold text-sm border border-primary/20 hover:bg-primary/10 transition-colors">
+                        <div className="flex gap-2 items-center text-primary">
+                          <span className="capitalize">{tagType}</span>
+                          <Badge variant="default" className="ml-2 bg-primary/20 text-primary hover:bg-primary/30">{typeTasks.length}</Badge>
+                        </div>
+                      </AccordionTrigger>
+                      <AccordionContent className="border border-t-0 border-primary/20 rounded-b-md p-4 grid grid-cols-1 lg:grid-cols-2 gap-3 bg-card overflow-visible">
+                        {typeTasks.map((t: any) => (
+                          <div key={t.id}
+                            onClick={() => setAssignTpls(prev => prev.includes(t.id.toString()) ? prev.filter(id => id !== t.id.toString()) : [...prev, t.id.toString()])}
+                            className={`border rounded p-3 flex flex-col gap-2 group cursor-pointer transition-all relative ${assignTpls.includes(t.id.toString()) ? 'border-primary bg-primary/5 ring-1 ring-primary shadow-sm' : 'border-border hover:border-primary/50'}`}>
+
+                            <div className="flex items-start gap-3 w-full">
+                              <Checkbox className="mt-0.5 pointer-events-none" checked={assignTpls.includes(t.id.toString())} />
+                              <div className="flex-1 min-w-0">
+                                <span className="text-sm font-medium text-foreground block truncate" title={t.name}>{t.name}</span>
+                                <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                                  {(t.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
+                                    <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] whitespace-nowrap">Morning 🌅</Badge>
+                                  ) : (t.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
+                                    <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] whitespace-nowrap">Evening 🌙</Badge>
+                                  ) : <Badge variant="secondary" className="text-[10px] text-muted-foreground bg-muted/30 whitespace-nowrap">Anytime</Badge>}
+
+                                  {t.next_execution_date && (
+                                    <div onClick={e => e.stopPropagation()}>
+                                      <Popover>
+                                        <PopoverTrigger asChild>
+                                          <Badge variant="secondary" className="bg-primary/10 text-primary border-primary/20 whitespace-nowrap text-[10px] cursor-pointer hover:bg-primary/20 hover:ring-1 ring-primary/30 transition-all font-semibold">
+                                            🗓 {format(new Date(t.next_execution_date), "MMM d")}
+                                          </Badge>
+                                        </PopoverTrigger>
+                                        <PopoverContent className="w-auto p-0" align="start">
+                                          <Calendar
+                                            mode="single"
+                                            selected={new Date(t.next_execution_date)}
+                                            onSelect={async (date) => {
+                                              if (!date) return;
+                                              const token = localStorage.getItem('access_token');
+                                              try {
+                                                await fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                                                  method: "PUT",
+                                                  headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+                                                  body: JSON.stringify({
+                                                    name: t.name,
+                                                    description: t.description || "",
+                                                    repeat_type: t.repeat_type,
+                                                    time_of_day: t.time_of_day || "anytime",
+                                                    zone_id: t.zone_id,
+                                                    photo_required: t.photo_required,
+                                                    next_execution_date: new Date(format(date, 'yyyy-MM-dd') + "T00:00:00").toISOString()
+                                                  })
+                                                });
+                                                queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                                                queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
+
+                                                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+                                              } catch (error) {
+                                                console.error("Failed to update date:", error);
+                                              }
+                                            }}
+                                            initialFocus
+                                          />
+                                        </PopoverContent>
+                                      </Popover>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity flex bg-background/80 backdrop-blur-sm rounded-md shadow-sm border px-1" onClick={e => e.stopPropagation()}>
+                              <TaskFormModal
+                                task={t}
+                                trigger={
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-primary" title="Edit Task">
+                                    <Pencil className="w-3 h-3" />
+                                  </Button>
+                                }
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </AccordionContent>
+                    </AccordionItem>
+                  );
+                })}
+              </Accordion>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -136,6 +136,40 @@ def unassign_task(req: TaskUnassignRequest, db: Session = Depends(get_db)):
         else:
             return {"status": "success", "message": "No specific task mapped for this date."}
 
+@router.post("/templates/unassign-all-global")
+def unassign_all_global(db: Session = Depends(get_db)):
+    """
+    Destructive endpoint that removes ALL assigned users and next_execution_dates from ALL templates,
+    and also unassigns ALL future Planned tasks so that statistics are not affected for past overdue/completed tasks.
+    """
+    now = datetime.now(timezone.utc)
+    
+    # 1. Clear scheduled definitions (EXCLUDING daily templates, which must remain assigned to supervisors structurally)
+    db.query(TaskTemplate).filter(
+        func.lower(TaskTemplate.repeat_type) != "daily"
+    ).update({
+        TaskTemplate.default_assigned_user: None,
+        TaskTemplate.next_execution_date: None
+    }, synchronize_session=False)
+    
+    # 2. Clear uncompleted future generated instances safely bypassing Overdue and Daily tasks
+    planned_tasks_query = db.query(Task.id).outerjoin(TaskTemplate, Task.template_id == TaskTemplate.id).filter(
+        Task.status == "Planned",
+        or_(TaskTemplate.id == None, func.lower(TaskTemplate.repeat_type) != "daily")
+    )
+    planned_task_ids = planned_tasks_query.all()
+    if planned_task_ids:
+        ids_to_del = [t.id for t in planned_task_ids]
+        
+        # Manually cascade delete dependent rows to avoid PostgreSQL IntegrityError
+        db.query(TaskComment).filter(TaskComment.task_id.in_(ids_to_del)).delete(synchronize_session=False)
+        db.query(TaskPhoto).filter(TaskPhoto.task_id.in_(ids_to_del)).delete(synchronize_session=False)
+        
+        # Finally delete uncompleted Tasks themselves
+        db.query(Task).filter(Task.id.in_(ids_to_del)).delete(synchronize_session=False)
+
+    db.commit()
+    return {"status": "success", "message": "All future tasks have been globally unassigned."}
 
 
 @router.post("/templates/", response_model=TaskTemplateResponse)
@@ -174,12 +208,52 @@ def update_template(template_id: int, template_in: TaskTemplateCreate, db: Sessi
     db_template = db.query(TaskTemplate).filter(TaskTemplate.id == template_id).first()
     if not db_template:
         raise HTTPException(status_code=404, detail="Template not found")
+        
+    old_date = db_template.next_execution_date
     
     for var, value in vars(template_in).items():
         setattr(db_template, var, value)
         
     db.commit()
     db.refresh(db_template)
+    
+    # Instantly generate a Task mapping if the user assigns next_execution_date explicitly (Calendar UX sync)
+    if db_template.next_execution_date and db_template.next_execution_date != old_date:
+        target_dt = db_template.next_execution_date
+        start_of_day = datetime(target_dt.year, target_dt.month, target_dt.day, 0, 0, tzinfo=timezone.utc)
+        end_of_day = start_of_day + timedelta(days=1)
+        
+        existing = db.query(Task).filter(
+            Task.template_id == db_template.id,
+            Task.scheduled_date >= start_of_day,
+            Task.scheduled_date < end_of_day
+        ).first()
+        
+        if not existing:
+            new_task = Task(
+                template_id=db_template.id,
+                zone_id=db_template.zone_id,
+                assigned_user=db_template.default_assigned_user,
+                scheduled_date=db_template.next_execution_date,
+                status="Planned",
+                priority="normal"
+            )
+            db.add(new_task)
+            db.commit()
+            
+    elif old_date and db_template.next_execution_date is None:
+        # If the task was unassigned (next_execution_date cleared), delete planned/overdue instances
+        tasks_to_delete = db.query(Task).filter(
+            Task.template_id == db_template.id,
+            Task.status.in_(["Planned", "Overdue"])
+        ).all()
+        ids_to_del = [t.id for t in tasks_to_delete]
+        if ids_to_del:
+            db.query(TaskComment).filter(TaskComment.task_id.in_(ids_to_del)).delete(synchronize_session=False)
+            db.query(TaskPhoto).filter(TaskPhoto.task_id.in_(ids_to_del)).delete(synchronize_session=False)
+            db.query(Task).filter(Task.id.in_(ids_to_del)).delete(synchronize_session=False)
+            db.commit()
+            
     return db_template
 
 @router.delete("/templates/bulk")
@@ -193,7 +267,12 @@ def delete_templates_bulk(template_ids: List[int] = Body(...), db: Session = Dep
     db_templates = db.query(TaskTemplate).filter(TaskTemplate.id.in_(template_ids)).all()
     count = len(db_templates)
     for tmpl in db_templates:
-        db.query(Task).filter(Task.template_id == tmpl.id).delete()
+        task_ids_query = db.query(Task.id).filter(Task.template_id == tmpl.id)
+        task_ids = [r[0] for r in task_ids_query.all()]
+        if task_ids:
+            db.query(TaskComment).filter(TaskComment.task_id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(TaskPhoto).filter(TaskPhoto.task_id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(Task).filter(Task.template_id == tmpl.id).delete(synchronize_session=False)
         db.delete(tmpl)
         
     db.commit()
@@ -205,7 +284,13 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
     if not db_template:
         raise HTTPException(status_code=404, detail="Template not found")
         
-    db.query(Task).filter(Task.template_id == template_id).delete()
+    task_ids_query = db.query(Task.id).filter(Task.template_id == template_id)
+    task_ids = [r[0] for r in task_ids_query.all()]
+    if task_ids:
+        db.query(TaskComment).filter(TaskComment.task_id.in_(task_ids)).delete(synchronize_session=False)
+        db.query(TaskPhoto).filter(TaskPhoto.task_id.in_(task_ids)).delete(synchronize_session=False)
+        db.query(Task).filter(Task.template_id == template_id).delete(synchronize_session=False)
+
     db.delete(db_template)
     db.commit()
     return {"ok": True}
@@ -314,7 +399,7 @@ async def import_templates_ai(file: UploadFile = File(...), db: Session = Depend
                 continue
             
             # Detect time of day
-            if val_lower in ["morning", "evening", "утро", "утром", "вечер", "вечером", "anytime", "любое", "не важно"] and col_map["time"] == -1:
+            if val_lower in ["1", "2", "shift 1", "shift 2", "shift1", "shift2", "смена 1", "смена 2", "смена1", "смена2", "morning", "evening", "утро", "утром", "вечер", "вечером", "anytime", "любое", "не важно"] and col_map["time"] == -1:
                 col_map["time"] = i
                 continue
             
@@ -385,7 +470,7 @@ async def import_templates_ai(file: UploadFile = File(...), db: Session = Depend
         for idx, val in enumerate(r_list):
             if idx == freq_mapped_idx: continue
             v_low = val.lower()
-            if any(w in v_low for w in ["morning", "утр", "evening", "вечер", "night", "ночь", "anytime", "любое"]):
+            if any(w in v_low for w in ["смена", "shift", "1", "2", "morning", "утр", "evening", "вечер", "night", "ночь", "anytime", "любое"]):
                 time_raw = v_low
                 time_mapped_idx = idx
                 break
@@ -427,8 +512,8 @@ async def import_templates_ai(file: UploadFile = File(...), db: Session = Depend
         
         # Normalize Time of Day
         time_of_day = "anytime"
-        if "morning" in time_raw or "утр" in time_raw: time_of_day = "morning"
-        elif "evening" in time_raw or "вечер" in time_raw or "night" in time_raw: time_of_day = "evening"
+        if any(w in time_raw for w in ["1", "morning", "утр"]): time_of_day = "1"
+        elif any(w in time_raw for w in ["2", "evening", "вечер", "night", "ночь"]): time_of_day = "2"
         
         zone_id = 1
         try:
@@ -501,7 +586,7 @@ def get_failed_tasks(db: Session = Depends(get_db)):
             Task.status == "Overdue",
             Task.ai_status == "Rejected"
         )
-    ).order_by(func.coalesce(Task.scheduled_date, Task.created_at).desc()).all()
+    ).order_by(Task.scheduled_date.desc(), Task.id.desc()).all()
     return tasks
 
 @router.post("/", response_model=TaskResponse)
@@ -601,9 +686,10 @@ def generate_daily_tasks(db: Session = Depends(get_db)):
     
     created_count = 0
     for tmpl in templates:
-        # Skip if we already generated a task for this template today
+        # Skip if we already generated a task for this template today (only applies to Daily)
         if tmpl.last_generated_date and tmpl.last_generated_date >= today_start:
-            continue
+            if (tmpl.repeat_type or "daily").lower() == "daily":
+                continue
             
         freq = (tmpl.repeat_type or "daily").lower()
         needs_run = False
@@ -615,20 +701,26 @@ def generate_daily_tasks(db: Session = Depends(get_db)):
                 needs_run = True
                 
         if needs_run:
-            tomorrow_start = today_start + timedelta(days=1)
+            # Determine the exact intended date this task should have been run
+            target_date = today_start if freq == "daily" else (tmpl.next_execution_date or today_start)
+            target_date_start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, tzinfo=timezone.utc)
+            target_date_end = target_date_start + timedelta(days=1)
+
             # Check if there's already a task scheduled for this exact calendar date
             existing = db.query(Task).filter(
                 Task.template_id == tmpl.id,
-                Task.scheduled_date >= today_start,
-                Task.scheduled_date < tomorrow_start
+                Task.scheduled_date >= target_date_start,
+                Task.scheduled_date < target_date_end
             ).first()
             
             if not existing:
+                schedule_dt = now if freq == "daily" else target_date
+                
                 new_task = Task(
                     template_id=tmpl.id,
                     zone_id=tmpl.zone_id,
                     assigned_user=tmpl.default_assigned_user,
-                    scheduled_date=now,
+                    scheduled_date=schedule_dt,
                     status="Planned",
                     priority="normal"
                 )
@@ -639,9 +731,7 @@ def generate_daily_tasks(db: Session = Depends(get_db)):
                 
                 # Advance next_execution_date for the future generators bridging math
                 if tmpl.next_execution_date:
-                    if freq == "project":
-                        tmpl.next_execution_date = None
-                    elif freq == "weekly":
+                    if freq == "weekly":
                         tmpl.next_execution_date += timedelta(days=7)
                     elif freq == "biweekly":
                         tmpl.next_execution_date += timedelta(days=14)
@@ -693,7 +783,7 @@ def complete_task(task_id: int, req: TaskCompleteRequest, background_tasks: Back
                 length=img_byte_arr.getbuffer().nbytes,
                 content_type="image/jpeg"
             )
-            file_url = f"http://89.167.122.76:4000/{MINIO_BUCKET}/{unique_filename}"
+            file_url = f"https://api.trypranaextract.com/{MINIO_BUCKET}/{unique_filename}"
             db.add(TaskPhoto(task_id=task_id, url=file_url))
         except Exception as e:
             print(f"Error processing base64 image: {e}")
@@ -734,3 +824,107 @@ def revert_task(task_id: int, req: TaskRevertRequest, db: Session = Depends(get_
     db.commit()
     db.refresh(db_task)
     return db_task
+
+@router.get("/calendar")
+def get_calendar(start_date: str, end_date: str, user_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """
+    Unified Endpoint generating accurate timeline projection arrays securely.
+    Returns: { "YYYY-MM-DD": [ ...tasks/templates... ] }
+    """
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
+
+    tasks_query = db.query(Task).options(joinedload(Task.template)).filter(
+        Task.scheduled_date >= start_dt,
+        Task.scheduled_date <= end_dt
+    )
+    if user_id is not None:
+        tasks_query = tasks_query.filter(or_(Task.assigned_user == user_id, Task.assigned_user == None))
+    real_tasks = tasks_query.all()
+
+    tmpl_query = db.query(TaskTemplate)
+    if user_id is not None:
+        tmpl_query = tmpl_query.filter(or_(TaskTemplate.default_assigned_user == user_id, TaskTemplate.default_assigned_user == None))
+    templates = tmpl_query.all()
+
+    cal_map = {}
+    curr = start_dt
+    while curr <= end_dt:
+        cal_map[curr.strftime("%Y-%m-%d")] = []
+        curr += timedelta(days=1)
+
+    task_keys = set()
+    for t in real_tasks:
+        if not t.scheduled_date:
+            continue
+        d_str = t.scheduled_date.strftime("%Y-%m-%d")
+        if d_str in cal_map:
+            cal_map[d_str].append({
+                "id": t.id,
+                "is_projected": False,
+                "template_id": t.template_id,
+                "assigned_user": t.assigned_user,
+                "status": t.status,
+                "scheduled_date": t.scheduled_date.isoformat(),
+                "repeat_type": t.template.repeat_type if t.template else None,
+                "template": {
+                    "id": t.template.id if t.template else None,
+                    "name": t.template.name if t.template else "Unknown",
+                    "time_of_day": t.template.time_of_day if t.template else "anytime",
+                    "repeat_type": t.template.repeat_type if t.template else None
+                } if t.template else None
+            })
+            task_keys.add(f"{t.template_id}_{d_str}")
+
+    def _push_projection(arr, tmpl, d_str):
+        arr.append({
+            "id": tmpl.id,
+            "is_projected": True,
+            "template_id": tmpl.id,
+            "assigned_user": tmpl.default_assigned_user,
+            "status": "Planned",
+            "scheduled_date": f"{d_str}T00:00:00Z",
+            "repeat_type": tmpl.repeat_type,
+            "template": {
+                "id": tmpl.id,
+                "name": tmpl.name,
+                "time_of_day": tmpl.time_of_day,
+                "repeat_type": tmpl.repeat_type
+            }
+        })
+
+    for tmpl in templates:
+        if not tmpl.next_execution_date:
+            continue
+        if str((tmpl.repeat_type or "").lower()) == "project":
+            d_str = tmpl.next_execution_date.strftime("%Y-%m-%d")
+            if d_str in cal_map and f"{tmpl.id}_{d_str}" not in task_keys:
+                _push_projection(cal_map[d_str], tmpl, d_str)
+            continue
+            
+        freq = (tmpl.repeat_type or "").lower()
+        if not freq:
+            continue
+            
+        current = tmpl.next_execution_date
+        while current <= end_dt:
+            if current >= start_dt:
+                d_str = current.strftime("%Y-%m-%d")
+                if d_str in cal_map and f"{tmpl.id}_{d_str}" not in task_keys:
+                    _push_projection(cal_map[d_str], tmpl, d_str)
+            
+            if freq == "daily":
+                current += timedelta(days=1)
+            elif freq == "weekly":
+                current += timedelta(days=7)
+            elif freq == "biweekly" or freq == "bi-weekly":
+                current += timedelta(days=14)
+            elif freq == "monthly":
+                current += timedelta(days=28)
+            else:
+                break
+                
+    return cal_map
