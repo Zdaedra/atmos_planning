@@ -36,6 +36,12 @@ def create_supervisor(user: UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return new_user
 
+import base64
+import uuid
+import io
+from PIL import Image, ImageOps
+from app.core.storage import get_minio_client, MINIO_BUCKET
+
 @router.put("/{user_id}", response_model=UserResponse)
 def update_supervisor(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db)):
     user_db = db.query(User).filter(User.id == user_id, User.role == "supervisor").first()
@@ -53,6 +59,38 @@ def update_supervisor(user_id: int, user_update: UserUpdate, db: Session = Depen
     if user_update.password:
         user_db.hashed_password = get_password_hash(user_update.password)
         user_db.plain_password = user_update.password
+        
+    if user_update.avatar_base64:
+        header, encoded = user_update.avatar_base64.split(",", 1) if "," in user_update.avatar_base64 else ("", user_update.avatar_base64)
+        try:
+            file_bytes = base64.b64decode(encoded)
+            image = Image.open(io.BytesIO(file_bytes))
+            image = ImageOps.exif_transpose(image)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+                
+            max_width = 400
+            if image.width > max_width:
+                ratio = max_width / image.width
+                image = image.resize((max_width, int(image.height * ratio)), Image.Resampling.LANCZOS)
+                
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format='JPEG', quality=80, optimize=True)
+            img_byte_arr.seek(0)
+            
+            client = get_minio_client()
+            unique_filename = f"avatar_{user_id}_{uuid.uuid4().hex[:8]}.jpg"
+            client.put_object(
+                MINIO_BUCKET,
+                unique_filename,
+                img_byte_arr,
+                length=img_byte_arr.getbuffer().nbytes,
+                content_type="image/jpeg"
+            )
+            file_url = f"https://api.trypranaextract.com/{MINIO_BUCKET}/{unique_filename}"
+            user_db.avatar_url = file_url
+        except Exception as e:
+            print(f"Error processing base64 avatar: {e}")
         
     db.commit()
     db.refresh(user_db)

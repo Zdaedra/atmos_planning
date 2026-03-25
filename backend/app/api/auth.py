@@ -50,20 +50,17 @@ def get_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
 def register(user: UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(User).filter(User.email == user.email).first()
     if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
     
     hashed_password = get_password_hash(user.password)
-    # Storing hashed password would require adding a field to the User model, 
-    # but for this MVP architecture based on the TZ we will add hashed_password to DB model dynamically or just rely on the auth service.
-    # To keep it simple, let's assume we modify the User model to include `hashed_password`
     new_user = User(
         name=user.name,
         email=user.email,
         role=user.role,
-        center_id=user.center_id
+        center_id=user.center_id,
+        plain_password=user.password,
+        hashed_password=hashed_password
     )
-    # Monkey-patching for the sake of the script, but in reality we should update the SQLAlchemy model.
-    setattr(new_user, 'hashed_password', hashed_password)
     
     db.add(new_user)
     db.commit()
@@ -80,6 +77,19 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    # Phase 79: Device Binding mapping client_id field safely
+    incoming_device_id = getattr(form_data, "client_id", None)
+    if incoming_device_id:
+        if not user.device_id:
+            user.device_id = incoming_device_id
+            db.commit()
+            db.refresh(user)
+        elif user.device_id != incoming_device_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Данный аккаунт уже привязан к другому устройству. Обратитесь к администратору для сброса.",
+            )
+            
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.email, "role": user.role}, expires_delta=access_token_expires
@@ -89,6 +99,21 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @router.patch("/users/{user_id}/archive", response_model=UserResponse)
 def archive_user(user_id: int, current_user: User = Depends(read_users_me), db: Session = Depends(get_db)):
+    print(f"[ARCHIVE_USER] Called by email={current_user.email}, role={current_user.role}", flush=True)
+    if current_user.role not in ["admin", "system_admin", "Admin"]:
+        raise HTTPException(status_code=403, detail=f"Not authorized. Role: '{current_user.role}', Email: '{current_user.email}'")
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    user.is_active = False
+    db.commit()
+    db.refresh(user)
+    return user
+
+@router.patch("/users/{user_id}/reset-device", response_model=UserResponse)
+def reset_device(user_id: int, current_user: User = Depends(read_users_me), db: Session = Depends(get_db)):
     if current_user.role not in ["admin", "system_admin"]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -96,7 +121,7 @@ def archive_user(user_id: int, current_user: User = Depends(read_users_me), db: 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
         
-    user.is_active = False
+    user.device_id = None
     db.commit()
     db.refresh(user)
     return user

@@ -77,7 +77,7 @@ def upload_photo(task_id: int, file: UploadFile = File(...), db: Session = Depen
         )
         
         # Hardcode the public Hetzner edge IP so phones can route properly outside the local docker network
-        file_url = f"http://89.167.122.76:4000/{MINIO_BUCKET}/{unique_filename}"
+        file_url = f"https://api.trypranaextract.com/{MINIO_BUCKET}/{unique_filename}"
         
         db_photo = TaskPhoto(
             task_id=task_id,

@@ -1,5 +1,6 @@
 version: "3.8"
 services:
+
   db:
     image: postgres:15-alpine
     container_name: atmos_db
@@ -44,6 +45,8 @@ services:
     environment:
       DATABASE_URL: postgresql://atmos:atmos_password@db:5432/atmos_db
       REDIS_URL: redis://redis:6379/
+      REFERENCE_LATITUDE: "-8.8139050"
+      REFERENCE_LONGITUDE: "115.1232718"
     depends_on:
       - db
       - redis
@@ -94,3 +97,5 @@ volumes:
   postgres_data:
   redis_data:
   minio_data:
+  caddy_data:
+  caddy_config:

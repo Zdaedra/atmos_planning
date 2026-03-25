@@ -1,7 +1,7 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, CartesianGrid } from "recharts";
-import { Users, CheckCircle2, AlertTriangle, CalendarDays, MapPin, Activity, Clock, XCircle, Send, Plus, Calendar as CalendarIcon, RefreshCw } from "lucide-react";
+import { Users, CheckCircle2, AlertTriangle, CalendarDays, MapPin, Activity, Clock, XCircle, Send, Plus, Calendar as CalendarIcon, RefreshCw, Pencil, Camera } from "lucide-react";
 import { toast } from "sonner";
 import { format, parseISO, addDays, addMonths, isBefore } from "date-fns";
 import { Calendar } from "@/components/ui/calendar";
@@ -27,6 +27,7 @@ export default function StaffStatsPage() {
     const queryClient = useQueryClient();
     const [timeframe, setTimeframe] = useState<"today" | "week" | "month" | "all">("week");
     const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
+    const [credentialsUser, setCredentialsUser] = useState<any>(null);
 
     const toggleTaskStatusMutation = useMutation({
         mutationFn: async (payload: { task_id: number; currentStatus: string }) => {
@@ -65,11 +66,17 @@ export default function StaffStatsPage() {
     const [newUserPassword, setNewUserPassword] = useState("");
     const [newUserRole, setNewUserRole] = useState("supervisor");
 
+    // Supervisor Edit states
+    const [isEditingName, setIsEditingName] = useState(false);
+    const [editNameValue, setEditNameValue] = useState("");
+    const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
     const { data: globalStats, isLoading: isLoadingGlobal, refetch: refetchGlobal } = useQuery({
         queryKey: ['personnelStats', timeframe],
         queryFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`http://89.167.122.76:4080/stats/personnel?timeframe=${timeframe}`, {
+            const res = await fetch(`https://api.trypranaextract.com/stats/personnel?timeframe=${timeframe}`, {
                 cache: "no-store",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -82,7 +89,7 @@ export default function StaffStatsPage() {
         queryKey: ['supervisorStats', selectedUserId, timeframe],
         queryFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`http://89.167.122.76:4080/stats/personnel/${selectedUserId}?timeframe=${timeframe}`, {
+            const res = await fetch(`https://api.trypranaextract.com/stats/personnel/${selectedUserId}?timeframe=${timeframe}`, {
                 cache: "no-store",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -95,7 +102,7 @@ export default function StaffStatsPage() {
     const { data: templates = [] } = useQuery({
         queryKey: ['templates'],
         queryFn: async () => {
-            const res = await fetch(`http://89.167.122.76:4080/tasks/templates`, {
+            const res = await fetch(`https://api.trypranaextract.com/tasks/templates`, {
                 cache: "no-store"
             });
             return res.json();
@@ -119,57 +126,40 @@ export default function StaffStatsPage() {
         enabled: !!selectedUserId
     });
 
-    // Compute Personal Calendar Tasks
+    const { data: calendarMap = {} } = useQuery({
+        queryKey: ['staffCalendar', selectedUserId],
+        queryFn: async () => {
+            if (!selectedUserId) return {};
+            const startD = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toISOString().split('T')[0];
+            const endD = new Date(new Date().getFullYear(), new Date().getMonth() + 2, 0).toISOString().split('T')[0];
+            const res = await fetch(`https://api.trypranaextract.com/tasks/calendar?start_date=${startD}&end_date=${endD}&user_id=${selectedUserId}`);
+            if (!res.ok) return {};
+            return res.json();
+        },
+        enabled: !!selectedUserId
+    });
+
+    // Compute Personal Calendar Tasks mapped gracefully from Unified Backend
     const personalCalendarTasks = useMemo(() => {
-        if (!selectedUserId) return {};
-        const calTasks: Record<string, any[]> = {};
-        const MAX_PROJECTION_MONTHS = 6;
-        const projectionLimit = addMonths(new Date(), MAX_PROJECTION_MONTHS);
-
-        // 1. Add active assigned tasks
-        allTasks.forEach((task: any) => {
-            if (task.assigned_user === selectedUserId && task.scheduled_date && task.template) {
-                const dateKey = typeof task.scheduled_date === 'string' ? task.scheduled_date.split('T')[0] : format(new Date(task.scheduled_date), "yyyy-MM-dd");
-                if (!calTasks[dateKey]) calTasks[dateKey] = [];
-                calTasks[dateKey].push({
-                    ...task.template,
-                    id: task.template_id,
-                    task_id: task.id,
-                    assigned_user: task.assigned_user,
-                    default_assigned_user: task.template?.default_assigned_user,
-                    time: task.template.time_of_day || "Anytime",
-                    tag: task.template.repeat_type || "unknown",
-                    status: task.status,
-                    is_real: true
-                });
-            }
+        if (!selectedUserId || !calendarMap) return {};
+        const mapped: Record<string, any[]> = {};
+        Object.keys(calendarMap).forEach(k => {
+            if (!Array.isArray(calendarMap[k])) return;
+            mapped[k] = calendarMap[k].map((t: any) => ({
+                ...t.template,
+                id: (t as any).template_id || (t as any).id,
+                task_id: t.is_projected ? undefined : t.id,
+                assigned_user: t.assigned_user,
+                default_assigned_user: t.template?.default_assigned_user,
+                time: t.template?.time_of_day || "Anytime",
+                tag: t.repeat_type || "unknown",
+                status: t.status,
+                is_real: !t.is_projected,
+                is_projected: t.is_projected
+            }));
         });
-
-        // 2. Project default-assigned templates into the future
-        templates.forEach((t: any) => {
-            if (t.default_assigned_user === selectedUserId && t.next_execution_date && t.repeat_type !== "daily") {
-                let currentDate = new Date(t.next_execution_date);
-                while (isBefore(currentDate, projectionLimit)) {
-                    const dateKey = format(currentDate, "yyyy-MM-dd");
-                    if (!calTasks[dateKey]) calTasks[dateKey] = [];
-                    const hasRealTask = calTasks[dateKey].some(ct => ct.is_real && ct.id === t.id);
-                    if (!hasRealTask) {
-                        calTasks[dateKey].push({
-                            ...t,
-                            time: t.time_of_day || "Anytime",
-                            tag: t.repeat_type || "unknown",
-                            is_projected: true
-                        });
-                    }
-                    if (t.repeat_type === 'weekly') { currentDate = addDays(currentDate, 7); }
-                    else if (t.repeat_type === 'biweekly' || t.repeat_type === 'bi-weekly') { currentDate = addDays(currentDate, 14); }
-                    else if (t.repeat_type === 'monthly') { currentDate = addDays(currentDate, 28); }
-                    else { break; }
-                }
-            }
-        });
-        return calTasks;
-    }, [allTasks, templates, selectedUserId]);
+        return mapped;
+    }, [calendarMap, selectedUserId]);
 
     const pcDateKey = format(personalDate, "yyyy-MM-dd");
     const pcAssignedTasks = personalCalendarTasks[pcDateKey] || [];
@@ -182,26 +172,23 @@ export default function StaffStatsPage() {
         });
     };
 
-    const pcPlannedTasks = sortTasksByTime(pcAssignedTasks.filter(t => t.repeat_type !== 'project' && t.repeat_type?.toLowerCase() !== 'daily'));
-    const pcProjectTasks = sortTasksByTime(pcAssignedTasks.filter(t => t.repeat_type === 'project'));
-    const pcInstantiatedDailyTasks = pcAssignedTasks.filter(t => t.repeat_type?.toLowerCase() === 'daily');
+    const pcPersonalTasks = sortTasksByTime(pcAssignedTasks.filter(t => t.assigned_user === selectedUserId || t.default_assigned_user === selectedUserId));
+    const pcPlannedTasks = sortTasksByTime(pcAssignedTasks.filter(t => (t.repeat_type || "").toLowerCase() !== 'project' && (t.repeat_type || "").toLowerCase() !== 'daily' && t.assigned_user !== selectedUserId && t.default_assigned_user !== selectedUserId));
+    const pcProjectTasks = sortTasksByTime(pcAssignedTasks.filter(t => (t.repeat_type || "").toLowerCase() === 'project' && t.assigned_user !== selectedUserId && t.default_assigned_user !== selectedUserId));
 
-    // Manually push Daily repeating tasks into the supervisor scope
-    const basePcDailyTasks = templates.filter((t: any) => t.repeat_type?.toLowerCase() === 'daily' && t.default_assigned_user === selectedUserId).map((t: any) => ({
-        ...t,
-        time: t.time_of_day || "Anytime",
-        tag: "daily"
-    }));
-
-    const pcDailyTasks = sortTasksByTime([...pcInstantiatedDailyTasks, ...basePcDailyTasks.filter((bdt: any) => !pcInstantiatedDailyTasks.some((idt: any) => idt.id === bdt.id))]);
     const pcTaskCounts: Record<string, number> = {};
-    Object.keys(personalCalendarTasks).forEach(k => pcTaskCounts[k] = personalCalendarTasks[k].length);
+    Object.keys(personalCalendarTasks).forEach(k => {
+        const nonDaily = personalCalendarTasks[k].filter(t => (t.repeat_type || "").toLowerCase() !== 'daily');
+        if (nonDaily.length > 0) {
+            pcTaskCounts[k] = nonDaily.length;
+        }
+    });
     const pcHighlightedDays = Object.keys(personalCalendarTasks).map((d) => parseISO(d));
 
     const sendMsgMutation = useMutation({
         mutationFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`http://89.167.122.76:4080/messages/`, {
+            const res = await fetch(`https://api.trypranaextract.com/messages/`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                 body: JSON.stringify({ user_id: selectedUserId, text: msgText })
@@ -219,7 +206,7 @@ export default function StaffStatsPage() {
     const assignTaskMutation = useMutation({
         mutationFn: async (params: { assignAll: boolean, assignDate: string | null }) => {
             const token = localStorage.getItem("access_token");
-            const promises = assignTpls.map(tplId => fetch(`http://89.167.122.76:4080/tasks/assign`, {
+            const promises = assignTpls.map(tplId => fetch(`https://api.trypranaextract.com/tasks/assign`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                 body: JSON.stringify({
@@ -241,6 +228,7 @@ export default function StaffStatsPage() {
             setAssignDate("");
             setAssignAll(false);
             queryClient.invalidateQueries({ queryKey: ['allTasks', selectedUserId] });
+            queryClient.invalidateQueries({ queryKey: ['staffCalendar', selectedUserId] });
             queryClient.invalidateQueries({ queryKey: ['templates'] });
         },
         onError: () => toast.error("Failed to assign tasks")
@@ -249,7 +237,7 @@ export default function StaffStatsPage() {
     const unassignTaskMutation = useMutation({
         mutationFn: async (params: { unassignAll: boolean, unassignDate: string | null }) => {
             const token = localStorage.getItem("access_token");
-            const promises = assignTpls.map(tplId => fetch(`http://89.167.122.76:4080/tasks/unassign`, {
+            const promises = assignTpls.map(tplId => fetch(`https://api.trypranaextract.com/tasks/unassign`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                 body: JSON.stringify({
@@ -269,6 +257,7 @@ export default function StaffStatsPage() {
             toast.success("Tasks unassigned successfully!");
             setAssignTpls([]);
             queryClient.invalidateQueries({ queryKey: ['allTasks', selectedUserId] });
+            queryClient.invalidateQueries({ queryKey: ['staffCalendar', selectedUserId] });
             queryClient.invalidateQueries({ queryKey: ['templates'] });
         },
         onError: () => toast.error("Failed to unassign tasks")
@@ -276,7 +265,7 @@ export default function StaffStatsPage() {
 
     const addUserMutation = useMutation({
         mutationFn: async () => {
-            const res = await fetch(`http://89.167.122.76:4080/auth/register`, {
+            const res = await fetch(`https://api.trypranaextract.com/auth/register`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -286,7 +275,10 @@ export default function StaffStatsPage() {
                     role: newUserRole
                 })
             });
-            if (!res.ok) throw new Error("Failed to create user");
+            if (!res.ok) {
+                const errData = await res.json().catch(() => null);
+                throw new Error((errData && errData.detail) ? errData.detail : "Failed to create user");
+            }
             return res.json();
         },
         onSuccess: () => {
@@ -298,13 +290,13 @@ export default function StaffStatsPage() {
             setNewUserRole("supervisor");
             refetchGlobal();
         },
-        onError: () => toast.error("Failed to create staff member")
+        onError: (err: any) => toast.error(err.message || "Failed to create staff member")
     });
 
     const archiveUserMutation = useMutation({
         mutationFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`http://89.167.122.76:4080/auth/users/${selectedUserId}/archive`, {
+            const res = await fetch(`https://api.trypranaextract.com/auth/users/${selectedUserId}/archive`, {
                 method: "PATCH",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -318,6 +310,72 @@ export default function StaffStatsPage() {
         },
         onError: () => toast.error("Failed to archive staff member")
     });
+
+    const resetDeviceMutation = useMutation({
+        mutationFn: async () => {
+            const token = localStorage.getItem("access_token");
+            const res = await fetch(`https://api.trypranaextract.com/auth/users/${selectedUserId}/reset-device`, {
+                method: "PATCH",
+                headers: { "Authorization": `Bearer ${token}` }
+            });
+            if (!res.ok) throw new Error("Failed to reset device");
+            return res.json();
+        },
+        onSuccess: () => {
+            toast.success("Device binding reset successfully!");
+            queryClient.invalidateQueries({ queryKey: ["supervisorStats", selectedUserId] });
+            queryClient.invalidateQueries({ queryKey: ["personnelStats"] });
+        },
+        onError: () => toast.error("Failed to reset device binding")
+    });
+
+    const updateSupervisorConfigMutation = useMutation({
+        mutationFn: async ({ id, data }: { id: number, data: any }) => {
+            const token = localStorage.getItem("access_token");
+            const res = await fetch(`https://api.trypranaextract.com/supervisors/${id}`, {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify(data)
+            });
+            if (!res.ok) throw new Error("Failed to update profile");
+            return res.json();
+        },
+        onSuccess: () => {
+            refetchGlobal();
+            queryClient.invalidateQueries({ queryKey: ['personnelStats'] });
+            queryClient.invalidateQueries({ queryKey: ['supervisorStats'] });
+            toast.success("Profile updated seamlessly.");
+        },
+        onError: () => toast.error("Failed to update profile.")
+    });
+
+    const handleSaveName = () => {
+        if (!selectedUserId || !editNameValue.trim() || editNameValue === userStats?.user?.name) {
+            setIsEditingName(false);
+            return;
+        }
+        updateSupervisorConfigMutation.mutate({ id: selectedUserId, data: { name: editNameValue.trim() } });
+        setIsEditingName(false);
+    };
+
+    const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file || !selectedUserId) return;
+
+        setIsUploadingAvatar(true);
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const base64data = reader.result;
+            updateSupervisorConfigMutation.mutate(
+                { id: selectedUserId, data: { avatar_base64: base64data } },
+                { onSettled: () => setIsUploadingAvatar(false) }
+            );
+        };
+        reader.readAsDataURL(file);
+    };
 
     const activePersonnel = globalStats?.personnel?.filter((u: any) => u.is_active !== false) || [];
     const archivedPersonnel = globalStats?.personnel?.filter((u: any) => u.is_active === false) || [];
@@ -366,8 +424,16 @@ export default function StaffStatsPage() {
                                         {roleUsers.map((user: any) => (
                                             <Card key={user.user_id} className="cursor-pointer hover:border-primary/50 transition-all hover:shadow-md h-full flex flex-col" onClick={() => setSelectedUserId(user.user_id)}>
                                                 <CardHeader className="flex flex-row items-center gap-4 pb-0 pt-5 pr-5 pl-5">
-                                                    <div className="w-12 h-12 rounded-full border bg-muted/30 flex items-center justify-center text-primary font-bold text-lg flex-shrink-0">
-                                                        {user.name.substring(0, 2).toUpperCase()}
+                                                    <div
+                                                        className="w-12 h-12 rounded-full border bg-muted/30 flex items-center justify-center text-primary font-bold text-lg flex-shrink-0 hover:bg-muted/50 transition-colors cursor-pointer relative overflow-hidden z-50 pointer-events-auto"
+                                                        title="Посмотреть учетные данные"
+                                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setCredentialsUser(user); }}
+                                                    >
+                                                        {user.avatar_url ? (
+                                                            <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
+                                                        ) : (
+                                                            user.name.substring(0, 2).toUpperCase()
+                                                        )}
                                                     </div>
                                                     <div className="min-w-0">
                                                         <CardTitle className="text-base truncate">{user.name}</CardTitle>
@@ -482,8 +548,16 @@ export default function StaffStatsPage() {
                                     {archivedPersonnel.map((user: any) => (
                                         <Card key={user.user_id} className="bg-muted/30 grayscale opacity-80 border-dashed pb-4">
                                             <CardHeader className="flex flex-row items-center gap-4 pb-0 pt-5 pr-5 pl-5">
-                                                <div className="w-12 h-12 rounded-full border bg-muted/50 flex items-center justify-center text-muted-foreground font-bold text-lg flex-shrink-0">
-                                                    {user.name.substring(0, 2).toUpperCase()}
+                                                <div
+                                                    className="w-12 h-12 rounded-full border bg-muted/50 flex items-center justify-center text-muted-foreground font-bold text-lg flex-shrink-0 hover:bg-muted/80 transition-colors cursor-pointer relative overflow-hidden z-50 pointer-events-auto"
+                                                    title="Посмотреть учетные данные"
+                                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setCredentialsUser(user); }}
+                                                >
+                                                    {user.avatar_url ? (
+                                                        <img src={user.avatar_url} alt="" className="w-full h-full object-cover" />
+                                                    ) : (
+                                                        user.name.substring(0, 2).toUpperCase()
+                                                    )}
                                                 </div>
                                                 <div className="min-w-0">
                                                     <CardTitle className="text-base truncate">{user.name}</CardTitle>
@@ -516,12 +590,48 @@ export default function StaffStatsPage() {
                         <div className="space-y-6 py-6">
                             <SheetHeader>
                                 <div className="flex items-center gap-4 border-b pb-4">
-                                    <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-xl">
-                                        {userStats.user.name.substring(0, 2).toUpperCase()}
+                                    <div className="relative group">
+                                        <div
+                                            className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-xl hover:bg-primary/20 transition-all cursor-pointer overflow-hidden z-50 pointer-events-auto shadow-sm border border-primary/20"
+                                            title="Click to update avatar"
+                                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); fileInputRef.current?.click(); }}
+                                        >
+                                            {isUploadingAvatar ? (
+                                                <div className="animate-spin w-6 h-6 border-2 border-primary border-t-transparent rounded-full" />
+                                            ) : userStats.user.avatar_url ? (
+                                                <img src={userStats.user.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
+                                            ) : (
+                                                userStats.user.name.substring(0, 2).toUpperCase()
+                                            )}
+                                            <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <Camera className="w-6 h-6 text-white" />
+                                            </div>
+                                        </div>
+                                        <input type="file" accept="image/*" className="hidden" ref={fileInputRef} onChange={handleAvatarUpload} />
                                     </div>
-                                    <div className="text-left">
-                                        <SheetTitle className="text-2xl">{userStats.user.name}</SheetTitle>
-                                        <SheetDescription className="flex items-center gap-1 mt-1 capitalize">
+                                    <div className="text-left flex-1">
+                                        <div className="flex items-center gap-2">
+                                            {isEditingName ? (
+                                                <Input
+                                                    autoFocus
+                                                    value={editNameValue}
+                                                    onChange={e => setEditNameValue(e.target.value)}
+                                                    onBlur={handleSaveName}
+                                                    onKeyDown={e => e.key === 'Enter' && handleSaveName()}
+                                                    className="text-2xl font-semibold w-full max-w-[250px] h-10 px-2"
+                                                />
+                                            ) : (
+                                                <SheetTitle
+                                                    className="text-2xl flex items-center gap-2 group cursor-pointer hover:text-primary transition-colors"
+                                                    onClick={() => { setEditNameValue(userStats.user.name); setIsEditingName(true); }}
+                                                    title="Click to edit name"
+                                                >
+                                                    {userStats.user.name}
+                                                    <Pencil className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                                </SheetTitle>
+                                            )}
+                                        </div>
+                                        <SheetDescription className="flex items-center gap-1 mt-1 capitalize cursor-pointer hover:text-foreground transition-colors w-fit" onClick={() => setCredentialsUser(userStats?.user)} title="Посмотреть учетные данные">
                                             <Users className="w-4 h-4" /> {userStats.user.role || 'Supervisor'}
                                         </SheetDescription>
                                     </div>
@@ -563,7 +673,7 @@ export default function StaffStatsPage() {
                                                 <h2 className="text-base font-semibold text-foreground mb-1">
                                                     Schedule for {format(personalDate, "EEE, MMM d")}
                                                 </h2>
-                                                <p className="text-xs text-muted-foreground mb-4">{pcDailyTasks.length + pcPlannedTasks.length + pcProjectTasks.length} tasks scheduled for {userStats?.name}</p>
+                                                <p className="text-xs text-muted-foreground mb-4">{pcPlannedTasks.length + pcProjectTasks.length} tasks scheduled for {userStats?.name}</p>
 
                                                 <div className="overflow-y-auto flex-1 pr-1">
                                                     <Accordion
@@ -572,32 +682,6 @@ export default function StaffStatsPage() {
                                                         value={openPersonalAccordions}
                                                         onValueChange={setOpenPersonalAccordions}
                                                     >
-                                                        {/* Daily Tasks */}
-                                                        <AccordionItem value="daily" className="border-b-0 bg-card rounded-md border shadow-sm">
-                                                            <AccordionTrigger className="bg-muted/10 px-4 rounded-t-md hover:no-underline font-medium text-sm">
-                                                                Daily Tasks ({pcDailyTasks.length})
-                                                            </AccordionTrigger>
-                                                            <AccordionContent className="p-0 overflow-visible">
-                                                                {pcDailyTasks.length === 0 ? (
-                                                                    <p className="text-xs text-muted-foreground p-4 text-center">No daily tasks</p>
-                                                                ) : (
-                                                                    <div className="divide-y divide-border">
-                                                                        {pcDailyTasks.map((t, i) => (
-                                                                            <div key={i} className="flex items-center gap-3 p-3 group">
-                                                                                {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                                                                                    <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
-                                                                                ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                                                                                    <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
-                                                                                ) : <span className="w-14" />}
-                                                                                <span className="text-sm font-medium flex-1 text-foreground">{t.name || t.template?.name}</span>
-                                                                                <Badge variant="secondary" className="text-[10px] capitalize">{t.tag}</Badge>
-                                                                                {(t.assigned_user || t.default_assigned_user) && <UserBadge userId={t.assigned_user || t.default_assigned_user} />}
-                                                                            </div>
-                                                                        ))}
-                                                                    </div>
-                                                                )}
-                                                            </AccordionContent>
-                                                        </AccordionItem>
                                                         {/* Planned Tasks */}
                                                         <AccordionItem value="planned" className="border-b-0 bg-card rounded-md border shadow-sm">
                                                             <AccordionTrigger className="bg-muted/10 px-4 rounded-t-md hover:no-underline font-medium text-sm">
@@ -610,10 +694,41 @@ export default function StaffStatsPage() {
                                                                     <div className="divide-y divide-border">
                                                                         {pcPlannedTasks.map((t, i) => (
                                                                             <div key={i} className={`flex items-center gap-3 p-3 group ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
-                                                                                {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                                                                                    <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
-                                                                                ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                                                                                    <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
+                                                                                {['1', 'morning', 'смена 1'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                                                                                    <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Shift 1</Badge>
+                                                                                ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                                                                                    <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Shift 2</Badge>
+                                                                                ) : <span className="w-14" />}
+                                                                                {t.status === 'Completed' && <CheckCircle2 className="w-3 h-3 text-success flex-shrink-0" />}
+                                                                                <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
+                                                                                    {t.name || t.template?.name}
+                                                                                </span>
+                                                                                <Badge variant="secondary" className="text-[10px] capitalize">{t.tag}</Badge>
+                                                                                {t.is_projected && <Badge variant="outline" className="text-[10px] text-orange-500 border-orange-200">Projected</Badge>}
+                                                                                {(t.assigned_user || t.default_assigned_user) && <UserBadge userId={t.assigned_user || t.default_assigned_user} />}
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </AccordionContent>
+                                                        </AccordionItem>
+
+                                                        {/* Assigned Tasks */}
+                                                        <AccordionItem value="assigned" className="border-b-0 bg-card rounded-md border shadow-sm mt-4">
+                                                            <AccordionTrigger className="bg-primary/5 text-primary px-4 rounded-t-md hover:no-underline font-medium text-sm">
+                                                                Personal Tasks ({pcPersonalTasks.length})
+                                                            </AccordionTrigger>
+                                                            <AccordionContent className="p-0 overflow-visible">
+                                                                {pcPersonalTasks.length === 0 ? (
+                                                                    <p className="text-xs text-muted-foreground p-4 text-center">No personal assignments</p>
+                                                                ) : (
+                                                                    <div className="divide-y divide-border">
+                                                                        {pcPersonalTasks.map((t, i) => (
+                                                                            <div key={i} className={`flex items-center gap-3 p-3 group ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
+                                                                                {['1', 'morning', 'смена 1'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                                                                                    <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Shift 1</Badge>
+                                                                                ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                                                                                    <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Shift 2</Badge>
                                                                                 ) : <span className="w-14" />}
                                                                                 {t.status === 'Completed' && <CheckCircle2 className="w-3 h-3 text-success flex-shrink-0" />}
                                                                                 <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
@@ -641,10 +756,10 @@ export default function StaffStatsPage() {
                                                                     <div className="divide-y divide-border">
                                                                         {pcProjectTasks.map((t, i) => (
                                                                             <div key={i} className={`flex items-center gap-3 p-3 group ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
-                                                                                {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                                                                                    <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
-                                                                                ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                                                                                    <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
+                                                                                {['1', 'morning', 'смена 1'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                                                                                    <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Shift 1</Badge>
+                                                                                ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                                                                                    <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Shift 2</Badge>
                                                                                 ) : <span className="w-14" />}
                                                                                 <span className="text-sm font-medium flex-1 text-foreground">{t.name || t.template?.name}</span>
                                                                                 <Badge variant="secondary" className="text-[10px] capitalize">{t.tag}</Badge>
@@ -668,7 +783,7 @@ export default function StaffStatsPage() {
                                             </div>
 
                                             {/* Action Bar at the Top */}
-                                            <div className="mb-6 pb-6 border-b flex flex-col gap-4">
+                                            <div className="sticky top-0 z-50 bg-background/95 backdrop-blur-md pt-4 pb-4 mb-6 border-b flex flex-col gap-4 px-2 shadow-sm -mx-2">
                                                 <div className="flex justify-end gap-3 w-full items-center">
                                                     <span className="text-sm text-muted-foreground mr-auto">
                                                         <strong>{assignTpls.length}</strong> tasks selected.
@@ -787,20 +902,36 @@ export default function StaffStatsPage() {
                                                     <p className="text-[13px] text-muted-foreground mb-4">
                                                         Archiving this staff member revokes their access. Historical data is preserved.
                                                     </p>
-                                                    <Button
-                                                        variant="destructive"
-                                                        size="sm"
-                                                        className="w-full"
-                                                        onClick={() => {
-                                                            if (confirm("Are you sure you want to archive this user?")) {
-                                                                archiveUserMutation.mutate();
-                                                            }
-                                                        }}
-                                                        disabled={archiveUserMutation.isPending}
-                                                    >
-                                                        <XCircle className="w-4 h-4 mr-2" />
-                                                        {archiveUserMutation.isPending ? "Archiving..." : "Archive Staff Member"}
-                                                    </Button>
+                                                    <div className="flex flex-col gap-2">
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="w-full bg-background"
+                                                            onClick={() => {
+                                                                if (confirm("Вы уверены, что хотите сбросить привязку устройства?")) {
+                                                                    resetDeviceMutation.mutate();
+                                                                }
+                                                            }}
+                                                            disabled={resetDeviceMutation.isPending}
+                                                        >
+                                                            <RefreshCw className={`w-4 h-4 mr-2 ${resetDeviceMutation.isPending ? 'animate-spin' : ''}`} />
+                                                            {resetDeviceMutation.isPending ? "Resetting..." : "Reset Device Binding"}
+                                                        </Button>
+                                                        <Button
+                                                            variant="destructive"
+                                                            size="sm"
+                                                            className="w-full"
+                                                            onClick={() => {
+                                                                if (confirm("Are you sure you want to archive this user?")) {
+                                                                    archiveUserMutation.mutate();
+                                                                }
+                                                            }}
+                                                            disabled={archiveUserMutation.isPending}
+                                                        >
+                                                            <XCircle className="w-4 h-4 mr-2" />
+                                                            {archiveUserMutation.isPending ? "Archiving..." : "Archive Staff Member"}
+                                                        </Button>
+                                                    </div>
                                                 </CardContent>
                                             </Card>
                                         </div>
@@ -829,7 +960,16 @@ export default function StaffStatsPage() {
                                                                     <div className="flex w-full justify-between items-center pr-4">
                                                                         <h3 className="font-bold text-lg text-foreground flex items-center gap-2">
                                                                             <CalendarIcon className="w-5 h-5 text-primary" />
-                                                                            {format(new Date(shift.date), "MMM d, yyyy")}
+                                                                            {(() => {
+                                                                                const [yyyy, mm, dd] = shift.date.split('-');
+                                                                                const localDate = new Date(parseInt(yyyy), parseInt(mm) - 1, parseInt(dd));
+                                                                                return format(localDate, "MMM d, yyyy");
+                                                                            })()}
+                                                                            {shift.latitude && shift.longitude && (
+                                                                                <a href={`https://www.google.com/maps?q=${shift.latitude},${shift.longitude}`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="ml-2 hover:bg-muted p-1 rounded-md transition-colors" title="View Shift Location">
+                                                                                    <MapPin className="w-4 h-4 text-emerald-600" />
+                                                                                </a>
+                                                                            )}
                                                                         </h3>
                                                                         <div className="flex gap-2">
                                                                             <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20">
@@ -861,53 +1001,121 @@ export default function StaffStatsPage() {
                                                             {shift.tasks && shift.tasks.length > 0 && (
                                                                 <div className="space-y-2 mt-4">
                                                                     <h4 className="text-sm font-semibold text-muted-foreground mb-2">Shift Tasks</h4>
-                                                                    {shift.tasks.map((task: any) => (
-                                                                        <div key={task.id} className="flex flex-col gap-2 p-3 bg-muted/20 border rounded-lg text-sm">
-                                                                            <div className="flex items-start justify-between">
-                                                                                <div className="flex items-center gap-2 flex-wrap">
-                                                                                    {task.status === "Completed" ? (
-                                                                                        <CheckCircle2 className="w-4 h-4 text-success" />
-                                                                                    ) : ['Failed', 'Overdue'].includes(task.status) ? (
-                                                                                        <XCircle className="w-4 h-4 text-destructive" />
-                                                                                    ) : (
-                                                                                        <Activity className="w-4 h-4 text-muted-foreground" />
-                                                                                    )}
-                                                                                    <span className="font-medium text-foreground">{task.name}</span>
-                                                                                    <Badge variant="secondary" className="text-[10px] uppercase">{task.type}</Badge>
-                                                                                </div>
-                                                                                <div className="flex items-center gap-2">
-                                                                                    <Badge variant={task.status === "Completed" ? "default" : ['Failed', 'Overdue'].includes(task.status) ? "destructive" : "outline"} className="text-[10px] hidden sm:inline-flex">
-                                                                                        {task.status}
-                                                                                    </Badge>
-                                                                                    <Button
-                                                                                        variant={task.status === "Completed" ? "outline" : "default"}
-                                                                                        size="sm"
-                                                                                        className="h-6 px-2 text-[10px] ml-1"
-                                                                                        onClick={() => toggleTaskStatusMutation.mutate({ task_id: task.id, currentStatus: task.status })}
-                                                                                        disabled={toggleTaskStatusMutation.isPending && toggleTaskStatusMutation.variables?.task_id === task.id}
-                                                                                    >
-                                                                                        {toggleTaskStatusMutation.isPending && toggleTaskStatusMutation.variables?.task_id === task.id ? (
-                                                                                            <RefreshCw className="w-3 h-3 animate-spin mr-1" />
-                                                                                        ) : task.status === "Completed" ? (
-                                                                                            <XCircle className="w-3 h-3 mr-1" />
-                                                                                        ) : (
-                                                                                            <CheckCircle2 className="w-3 h-3 mr-1" />
+                                                                    {(() => {
+                                                                        const tDaily = shift.tasks.filter((t: any) => t.type?.toLowerCase() === 'daily');
+                                                                        const tPlanned = shift.tasks.filter((t: any) => t.type?.toLowerCase() === 'planned');
+                                                                        const tProject = shift.tasks.filter((t: any) => t.type?.toLowerCase() === 'project');
+                                                                        const tAssigned = shift.tasks.filter((t: any) => t.type?.toLowerCase() === 'assigned');
+
+                                                                        const renderTaskList = (tasks: any[]) => (
+                                                                            <div className="space-y-2">
+                                                                                {tasks.map((task: any) => (
+                                                                                    <div key={task.id} className="flex flex-col gap-2 p-3 bg-muted/20 border rounded-lg text-sm">
+                                                                                        <div className="flex items-start justify-between">
+                                                                                            <div className="flex items-center gap-2 flex-wrap">
+                                                                                                {task.status === "Completed" ? (
+                                                                                                    <CheckCircle2 className="w-4 h-4 text-success" />
+                                                                                                ) : ['Failed', 'Overdue'].includes(task.status) ? (
+                                                                                                    <XCircle className="w-4 h-4 text-destructive" />
+                                                                                                ) : (
+                                                                                                    <Activity className="w-4 h-4 text-muted-foreground" />
+                                                                                                )}
+                                                                                                <span className="font-medium text-foreground">{task.name}</span>
+                                                                                                <Badge variant="secondary" className="text-[10px] uppercase">{task.type}</Badge>
+                                                                                            </div>
+                                                                                            <div className="flex items-center gap-2">
+                                                                                                <Badge variant={task.status === "Completed" ? "default" : ['Failed', 'Overdue'].includes(task.status) ? "destructive" : "outline"} className="text-[10px] hidden sm:inline-flex">
+                                                                                                    {task.status}
+                                                                                                </Badge>
+                                                                                                <Button
+                                                                                                    variant={task.status === "Completed" ? "outline" : "default"}
+                                                                                                    size="sm"
+                                                                                                    className="h-6 px-2 text-[10px] ml-1"
+                                                                                                    onClick={() => toggleTaskStatusMutation.mutate({ task_id: task.id, currentStatus: task.status })}
+                                                                                                    disabled={toggleTaskStatusMutation.isPending && toggleTaskStatusMutation.variables?.task_id === task.id}
+                                                                                                >
+                                                                                                    {toggleTaskStatusMutation.isPending && toggleTaskStatusMutation.variables?.task_id === task.id ? (
+                                                                                                        <RefreshCw className="w-3 h-3 animate-spin mr-1" />
+                                                                                                    ) : task.status === "Completed" ? (
+                                                                                                        <XCircle className="w-3 h-3 mr-1" />
+                                                                                                    ) : (
+                                                                                                        <CheckCircle2 className="w-3 h-3 mr-1" />
+                                                                                                    )}
+                                                                                                    {task.status === "Completed" ? "Mark Undone" : "Mark Done"}
+                                                                                                </Button>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                        {task.photos && task.photos.length > 0 && (
+                                                                                            <div className="flex gap-2 mt-1 overflow-x-auto pb-1">
+                                                                                                {task.photos.map((photoUrl: string, idx: number) => (
+                                                                                                    <a href={photoUrl} target="_blank" rel="noreferrer" key={idx} className="flex-shrink-0">
+                                                                                                        <img src={photoUrl} alt="Task Proof" className="h-12 w-12 object-cover rounded-md border border-border/50 hover:opacity-80 transition-opacity" />
+                                                                                                    </a>
+                                                                                                ))}
+                                                                                            </div>
                                                                                         )}
-                                                                                        {task.status === "Completed" ? "Mark Undone" : "Mark Done"}
-                                                                                    </Button>
-                                                                                </div>
+                                                                                    </div>
+                                                                                ))}
                                                                             </div>
-                                                                            {task.photos && task.photos.length > 0 && (
-                                                                                <div className="flex gap-2 mt-1 overflow-x-auto pb-1">
-                                                                                    {task.photos.map((photoUrl: string, idx: number) => (
-                                                                                        <a href={photoUrl} target="_blank" rel="noreferrer" key={idx} className="flex-shrink-0">
-                                                                                            <img src={photoUrl} alt="Task Proof" className="h-12 w-12 object-cover rounded-md border border-border/50 hover:opacity-80 transition-opacity" />
-                                                                                        </a>
-                                                                                    ))}
+                                                                        );
+
+                                                                        if (shift.tasks.length === 0) {
+                                                                            return (
+                                                                                <div className="text-center py-6 px-4 bg-muted/10 border border-dashed border-border/60 rounded-lg">
+                                                                                    <Activity className="w-8 h-8 text-muted-foreground/30 mx-auto mb-2" />
+                                                                                    <p className="text-sm font-semibold text-foreground">Shift Active</p>
+                                                                                    <p className="text-xs text-muted-foreground mx-auto mt-1 max-w-[200px]">
+                                                                                        Supervisor checked in but no task metrics were recorded.
+                                                                                    </p>
                                                                                 </div>
-                                                                            )}
-                                                                        </div>
-                                                                    ))}
+                                                                            );
+                                                                        }
+
+                                                                        return (
+                                                                            <Accordion type="multiple" className="w-full space-y-3">
+                                                                                {tDaily.length > 0 && (
+                                                                                    <AccordionItem value="daily" className="border bg-card rounded-md shadow-sm">
+                                                                                        <AccordionTrigger className="bg-muted/10 px-4 rounded-t-md hover:no-underline font-semibold text-sm">
+                                                                                            Daily Tasks ({tDaily.length})
+                                                                                        </AccordionTrigger>
+                                                                                        <AccordionContent className="p-4 pt-4 border-t overflow-visible">
+                                                                                            {renderTaskList(tDaily)}
+                                                                                        </AccordionContent>
+                                                                                    </AccordionItem>
+                                                                                )}
+                                                                                {tPlanned.length > 0 && (
+                                                                                    <AccordionItem value="planned" className="border bg-card rounded-md shadow-sm">
+                                                                                        <AccordionTrigger className="bg-muted/10 px-4 rounded-t-md hover:no-underline font-semibold text-sm">
+                                                                                            Planned Tasks ({tPlanned.length})
+                                                                                        </AccordionTrigger>
+                                                                                        <AccordionContent className="p-4 pt-4 border-t overflow-visible">
+                                                                                            {renderTaskList(tPlanned)}
+                                                                                        </AccordionContent>
+                                                                                    </AccordionItem>
+                                                                                )}
+                                                                                {tProject.length > 0 && (
+                                                                                    <AccordionItem value="project" className="border bg-card rounded-md shadow-sm">
+                                                                                        <AccordionTrigger className="bg-muted/10 px-4 rounded-t-md hover:no-underline font-semibold text-sm">
+                                                                                            Project Tasks ({tProject.length})
+                                                                                        </AccordionTrigger>
+                                                                                        <AccordionContent className="p-4 pt-4 border-t overflow-visible">
+                                                                                            {renderTaskList(tProject)}
+                                                                                        </AccordionContent>
+                                                                                    </AccordionItem>
+                                                                                )}
+                                                                                {tAssigned.length > 0 && (
+                                                                                    <AccordionItem value="assigned" className="border bg-card rounded-md shadow-sm">
+                                                                                        <AccordionTrigger className="bg-muted/10 px-4 rounded-t-md hover:no-underline font-semibold text-sm">
+                                                                                            Assigned Tasks ({tAssigned.length})
+                                                                                        </AccordionTrigger>
+                                                                                        <AccordionContent className="p-4 pt-4 border-t overflow-visible">
+                                                                                            {renderTaskList(tAssigned)}
+                                                                                        </AccordionContent>
+                                                                                    </AccordionItem>
+                                                                                )}
+                                                                            </Accordion>
+                                                                        );
+                                                                    })()}
                                                                 </div>
                                                             )}
                                                         </AccordionContent>
@@ -924,12 +1132,13 @@ export default function StaffStatsPage() {
                             <AlertTriangle className="w-8 h-8 mb-2 opacity-50" />
                             <p>Supervisor data could not be loaded.</p>
                         </div>
-                    )}
-                </SheetContent>
-            </Sheet>
+                    )
+                    }
+                </SheetContent >
+            </Sheet >
 
             {/* Add New Staff Dialog */}
-            <Dialog open={isAddUserOpen} onOpenChange={setIsAddUserOpen}>
+            < Dialog open={isAddUserOpen} onOpenChange={setIsAddUserOpen} >
                 <DialogContent className="sm:max-w-[425px]">
                     <DialogHeader>
                         <DialogTitle>Add New Staff</DialogTitle>
@@ -974,10 +1183,10 @@ export default function StaffStatsPage() {
                         </Button>
                     </DialogFooter>
                 </DialogContent>
-            </Dialog>
+            </Dialog >
 
             {/* Assign Confirmation Dialog */}
-            <Dialog open={isAssignModalOpen} onOpenChange={setIsAssignModalOpen}>
+            < Dialog open={isAssignModalOpen} onOpenChange={setIsAssignModalOpen} >
                 <DialogContent className="sm:max-w-[500px]">
                     <DialogHeader>
                         <DialogTitle>Confirm Assignment Scope</DialogTitle>
@@ -1017,10 +1226,10 @@ export default function StaffStatsPage() {
                         </Button>
                     </div>
                 </DialogContent>
-            </Dialog>
+            </Dialog >
 
             {/* Unassign Confirmation Dialog */}
-            <Dialog open={isUnassignModalOpen} onOpenChange={setIsUnassignModalOpen}>
+            < Dialog open={isUnassignModalOpen} onOpenChange={setIsUnassignModalOpen} >
                 <DialogContent className="sm:max-w-[500px]">
                     <DialogHeader>
                         <DialogTitle>Confirm Unassignment Scope</DialogTitle>
@@ -1055,6 +1264,40 @@ export default function StaffStatsPage() {
                             <span className="font-semibold text-base mb-1 flex items-center gap-2">All future occurrences <XCircle className="w-4 h-4" /></span>
                             <span className="text-sm font-normal opacity-90">Unassigns the recurring series infinitely going forward.</span>
                         </Button>
+                    </div>
+                </DialogContent>
+            </Dialog >
+
+            {/* Credentials Info Dialog */}
+            <Dialog open={!!credentialsUser} onOpenChange={(open) => {
+                if (!open) { setCredentialsUser(null); }
+            }}>
+                <DialogContent className="sm:max-w-[400px] z-[99999]" onInteractOutside={(e) => setCredentialsUser(null)}>
+                    <DialogHeader>
+                        <DialogTitle>Учетные данные: {credentialsUser?.name}</DialogTitle>
+                        <DialogDescription>
+                            Используются для входа в приложение.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-4 py-4">
+                        <div className="flex flex-col gap-2">
+                            <Label htmlFor="email" className="font-semibold text-muted-foreground">Email</Label>
+                            <Input
+                                id="email"
+                                value={credentialsUser?.email || "Не указан"}
+                                readOnly
+                                className="bg-muted/50 font-mono text-sm h-10 border-muted"
+                            />
+                        </div>
+                        <div className="flex flex-col gap-2">
+                            <Label htmlFor="password" className="font-semibold text-muted-foreground">Пароль</Label>
+                            <Input
+                                id="password"
+                                value={credentialsUser?.plain_password || "Не сохранен / Скрыт"}
+                                readOnly
+                                className="bg-muted/50 font-mono text-sm h-10 border-muted"
+                            />
+                        </div>
                     </div>
                 </DialogContent>
             </Dialog>

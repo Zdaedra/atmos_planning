@@ -403,7 +403,7 @@ export default function CalendarPage() {
                         time_of_day: taskToAssign.time_of_day || "anytime",
                         zone_id: taskToAssign.zone_id,
                         photo_required: taskToAssign.photo_required,
-                        next_execution_date: new Date(format(selectedDate, 'yyyy-MM-dd') + "T00:00:00").toISOString()
+                        next_execution_date: format(selectedDate, 'yyyy-MM-dd') + "T00:00:00Z"
                       };
 
                       fetch(`https://api.trypranaextract.com/tasks/templates/${taskToAssign.id}`, {
@@ -484,8 +484,8 @@ export default function CalendarPage() {
                         time_of_day: time || "anytime",
                         zone_id: 1, // Default zone
                         photo_required: needsPhoto,
-                        // Ensure local midnight
-                        next_execution_date: new Date(format(selectedDate, 'yyyy-MM-dd') + "T00:00:00").toISOString()
+                        // Ensure it stays on the selected date by passing UTC midnight
+                        next_execution_date: format(selectedDate, 'yyyy-MM-dd') + "T00:00:00Z"
                       };
 
                       fetch("https://api.trypranaextract.com/tasks/templates/", {
@@ -572,7 +572,7 @@ export default function CalendarPage() {
                       time_of_day: t.time_of_day || "anytime",
                       zone_id: t.zone_id,
                       photo_required: t.photo_required,
-                      next_execution_date: new Date(format(selectedDate, 'yyyy-MM-dd') + "T00:00:00").toISOString()
+                      next_execution_date: format(selectedDate, 'yyyy-MM-dd') + "T00:00:00Z"
                     })
                   });
                 });
@@ -717,7 +717,7 @@ export default function CalendarPage() {
                                                     time_of_day: t.time_of_day || "anytime",
                                                     zone_id: t.zone_id,
                                                     photo_required: t.photo_required,
-                                                    next_execution_date: new Date(format(date, 'yyyy-MM-dd') + "T00:00:00").toISOString()
+                                                    next_execution_date: format(date, 'yyyy-MM-dd') + "T00:00:00Z"
                                                   })
                                                 });
                                                 queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });

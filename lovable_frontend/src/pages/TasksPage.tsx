@@ -119,10 +119,10 @@ export default function TasksPage() {
                 </div>
               </TableCell>
               <TableCell>
-                {(t.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                  <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20">Morning 🌅</Badge>
-                ) : (t.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                  <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20">Evening 🌙</Badge>
+                {['1', 'morning', 'смена 1'].includes((t.time_of_day || 'anytime').toLowerCase()) ? (
+                  <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20">Shift 1</Badge>
+                ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || 'anytime').toLowerCase()) ? (
+                  <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20">Shift 2</Badge>
                 ) : (
                   <Badge variant="secondary" className="text-muted-foreground bg-muted/30">Anytime</Badge>
                 )}
@@ -161,7 +161,25 @@ export default function TasksPage() {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-foreground">Tasks</h1>
-        <div className="flex gap-3">
+        <div className="flex gap-3 items-center">
+          <Button variant="destructive" size="sm" onClick={async () => {
+            if (window.confirm("Удалить все назначения (исполнителей и даты) для ВСЕХ будущих задач? Это действие нельзя отменить.")) {
+              const token = localStorage.getItem('access_token');
+              try {
+                await fetch(`https://api.trypranaextract.com/tasks/templates/unassign-all-global`, {
+                  method: "POST",
+                  headers: { "Authorization": `Bearer ${token}` }
+                });
+                queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
+                alert("Все будущие назначения успешно очищены!");
+              } catch (e) {
+                console.error("Failed to unassign all", e);
+              }
+            }
+          }}>
+            Сбросить все назначения
+          </Button>
           <Button variant="outline">
             <Upload className="w-4 h-4 mr-2" />
             Import via CSV/AI

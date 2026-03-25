@@ -236,9 +236,15 @@ function TaskRulesTab() {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [viewingTemplate, setViewingTemplate] = useState<any>(null);
 
+    useEffect(() => {
+        if (repeatType !== "daily" && timeOfDay === "anytime") {
+            setTimeOfDay("1");
+        }
+    }, [repeatType, timeOfDay]);
+
     const fetchTemplates = async () => {
         try {
-            const res = await fetch("http://89.167.122.76:4080/tasks/templates/");
+            const res = await fetch("https://api.trypranaextract.com/tasks/templates/");
             if (res.ok) {
                 const data = await res.json();
                 setTemplates(data);
@@ -253,7 +259,7 @@ function TaskRulesTab() {
 
     const fetchZones = async () => {
         try {
-            const res = await fetch("http://89.167.122.76:4080/locations/zones/");
+            const res = await fetch("https://api.trypranaextract.com/locations/zones/");
             if (res.ok) {
                 const data = await res.json();
                 setZones(data);
@@ -268,7 +274,7 @@ function TaskRulesTab() {
         if (!confirm(`Are you sure you want to delete ${selectedTasks.length} task rules?`)) return;
 
         try {
-            const res = await fetch("http://89.167.122.76:4080/tasks/templates/bulk", {
+            const res = await fetch("https://api.trypranaextract.com/tasks/templates/bulk", {
                 method: "DELETE",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(selectedTasks)
@@ -301,7 +307,7 @@ function TaskRulesTab() {
             const formData = new FormData();
             formData.append("file", importFile);
 
-            const res = await fetch("http://89.167.122.76:4080/tasks/templates/import-ai", {
+            const res = await fetch("https://api.trypranaextract.com/tasks/templates/import-ai", {
                 method: "POST",
                 body: formData
             });
@@ -328,8 +334,8 @@ function TaskRulesTab() {
         try {
             const isEditing = viewingTemplate !== null;
             const url = isEditing
-                ? `http://89.167.122.76:4080/tasks/templates/${viewingTemplate.id}`
-                : "http://89.167.122.76:4080/tasks/templates/";
+                ? `https://api.trypranaextract.com/tasks/templates/${viewingTemplate.id}`
+                : "https://api.trypranaextract.com/tasks/templates/";
 
             const res = await fetch(url, {
                 method: isEditing ? "PUT" : "POST",
@@ -496,11 +502,11 @@ function TaskRulesTab() {
                             )}
 
                             <div className="input-group">
-                                <label className="input-label">Time of Day</label>
+                                <label className="input-label">Shift / Time of Day</label>
                                 <select value={timeOfDay} onChange={e => setTimeOfDay(e.target.value)} className="input-field">
-                                    <option value="morning">Morning</option>
-                                    <option value="evening">Evening</option>
-                                    <option value="anytime">Anytime</option>
+                                    <option value="1">Shift 1 (Смена 1)</option>
+                                    <option value="2">Shift 2 (Смена 2)</option>
+                                    <option value="anytime">Anytime (Любое время - Daily only)</option>
                                 </select>
                             </div>
 
@@ -523,7 +529,7 @@ function TaskRulesTab() {
                                         type="button"
                                         onClick={async () => {
                                             if (confirm("Are you sure you want to delete this task rule?")) {
-                                                await fetch(`http://89.167.122.76:4080/tasks/templates/${viewingTemplate.id}`, { method: "DELETE" });
+                                                await fetch(`https://api.trypranaextract.com/tasks/templates/${viewingTemplate.id}`, { method: "DELETE" });
                                                 setViewingTemplate(null);
                                                 setShowForm(false);
                                                 fetchTemplates();
@@ -715,8 +721,8 @@ function CentersTab() {
     const fetchLocations = async () => {
         try {
             const [cRes, zRes] = await Promise.all([
-                fetch("http://89.167.122.76:4080/locations/centers/"),
-                fetch("http://89.167.122.76:4080/locations/zones/")
+                fetch("https://api.trypranaextract.com/locations/centers/"),
+                fetch("https://api.trypranaextract.com/locations/zones/")
             ]);
             if (cRes.ok) setCenters(await cRes.json());
             if (zRes.ok) setZones(await zRes.json());
@@ -732,7 +738,7 @@ function CentersTab() {
     const handleCreateCenter = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
-            const res = await fetch("http://89.167.122.76:4080/locations/centers/", {
+            const res = await fetch("https://api.trypranaextract.com/locations/centers/", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -754,7 +760,7 @@ function CentersTab() {
     const handleCreateZone = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
-            const res = await fetch("http://89.167.122.76:4080/locations/zones/", {
+            const res = await fetch("https://api.trypranaextract.com/locations/zones/", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -894,7 +900,7 @@ function UsersTab() {
 
     const fetchData = async () => {
         try {
-            const uRes = await fetch("http://89.167.122.76:4080/supervisors/");
+            const uRes = await fetch("https://api.trypranaextract.com/supervisors/");
             if (uRes.ok) setUsers(await uRes.json());
         } catch (e) {
             console.error(e);
@@ -926,8 +932,8 @@ function UsersTab() {
         try {
             const isEditing = !!editingUser;
             const url = isEditing
-                ? `http://89.167.122.76:4080/supervisors/${editingUser.id}`
-                : "http://89.167.122.76:4080/supervisors/";
+                ? `https://api.trypranaextract.com/supervisors/${editingUser.id}`
+                : "https://api.trypranaextract.com/supervisors/";
             const method = isEditing ? "PUT" : "POST";
 
             const payload: any = {
@@ -959,7 +965,7 @@ function UsersTab() {
     const handleDeleteUser = async (user_id: string | number) => {
         if (!confirm("Are you sure you want to delete this supervisor? This may orphan their tasks if not handled.")) return;
         try {
-            const res = await fetch(`http://89.167.122.76:4080/supervisors/${user_id}`, {
+            const res = await fetch(`https://api.trypranaextract.com/supervisors/${user_id}`, {
                 method: "DELETE"
             });
             if (res.ok) {
@@ -1063,7 +1069,7 @@ function PhotoReportsTab() {
 
     const fetchReports = async () => {
         try {
-            const res = await fetch("http://89.167.122.76:4080/media/reports");
+            const res = await fetch("https://api.trypranaextract.com/media/reports");
             if (res.ok) {
                 setReports(await res.json());
             }
@@ -1079,7 +1085,7 @@ function PhotoReportsTab() {
     const handleDeleteReport = async (reportId: string | number) => {
         if (!confirm("Are you sure you want to delete this photo report?")) return;
         try {
-            const res = await fetch(`http://89.167.122.76:4080/media/reports/${reportId}`, {
+            const res = await fetch(`https://api.trypranaextract.com/media/reports/${reportId}`, {
                 method: "DELETE"
             });
             if (res.ok) {
@@ -1269,12 +1275,11 @@ function EditTaskModal({ task, zones, onClose, onSave }: { task: any, zones: any
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
                         <div className="input-group">
-                            <label className="input-label">Time of Day</label>
+                            <label className="input-label">Shift / Time of Day</label>
                             <select value={timeOfDay} onChange={e => setTimeOfDay(e.target.value)} className="input-field">
-                                <option value="anytime">Anytime</option>
-                                <option value="morning">Morning</option>
-                                <option value="afternoon">Afternoon</option>
-                                <option value="evening">Evening</option>
+                                <option value="1">Shift 1 (Смена 1)</option>
+                                <option value="2">Shift 2 (Смена 2)</option>
+                                <option value="anytime">Anytime (Любое время - Daily only)</option>
                             </select>
                         </div>
                         <div className="input-group" style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "28px" }}>
@@ -1324,7 +1329,7 @@ function OverviewDashboard() {
         setViewingReportTask(act);
         setLoadingReport(true);
         try {
-            const res = await fetch(`http://89.167.122.76:4080/tasks/${act.task_id}/report`);
+            const res = await fetch(`https://api.trypranaextract.com/tasks/${act.task_id}/report`);
             if (res.ok) {
                 setTaskReport(await res.json());
             }
@@ -1340,7 +1345,7 @@ function OverviewDashboard() {
         setViewPhotoTask(task);
         setLoadingPhotos(true);
         try {
-            const res = await fetch(process.env.NEXT_PUBLIC_API_URL || "http://89.167.122.76:4080/media/reports");
+            const res = await fetch(process.env.NEXT_PUBLIC_API_URL || "https://api.trypranaextract.com/media/reports");
             if (res.ok) {
                 const allPhotos = await res.json();
                 setTaskPhotos(allPhotos.filter((p: any) => p.task_id === task.id));
@@ -1352,7 +1357,7 @@ function OverviewDashboard() {
     useEffect(() => {
         const fetchZones = async () => {
             try {
-                const res = await fetch("http://89.167.122.76:4080/locations/zones/");
+                const res = await fetch("https://api.trypranaextract.com/locations/zones/");
                 if (res.ok) setAllZones(await res.json());
             } catch (e) { console.error(e); }
         };
@@ -1360,7 +1365,7 @@ function OverviewDashboard() {
 
         const fetchDashboard = async () => {
             try {
-                const url = (process.env.NEXT_PUBLIC_API_URL && !process.env.NEXT_PUBLIC_API_URL.endsWith('/')) ? `${process.env.NEXT_PUBLIC_API_URL}/dashboard/` : "http://89.167.122.76:4080/dashboard/";
+                const url = (process.env.NEXT_PUBLIC_API_URL && !process.env.NEXT_PUBLIC_API_URL.endsWith('/')) ? `${process.env.NEXT_PUBLIC_API_URL}/dashboard/` : "https://api.trypranaextract.com/dashboard/";
                 const res = await fetch(url);
                 if (res.ok) {
                     setData(await res.json());
@@ -1378,14 +1383,14 @@ function OverviewDashboard() {
 
     const handleEditSave = async (updatedTemplate: any) => {
         try {
-            const res = await fetch(`http://89.167.122.76:4080/tasks/templates/${updatedTemplate.id}`, {
+            const res = await fetch(`https://api.trypranaextract.com/tasks/templates/${updatedTemplate.id}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(updatedTemplate)
             });
             if (res.ok) {
                 // Force a dashboard refresh to grab the newly edited template names
-                const fetchRes = await fetch("http://89.167.122.76:4080/dashboard/");
+                const fetchRes = await fetch("https://api.trypranaextract.com/dashboard/");
                 if (fetchRes.ok) setData(await fetchRes.json());
                 setEditingTask(null);
             } else {
@@ -1907,7 +1912,7 @@ function CalendarTab() {
 
     const fetchTemplates = async () => {
         try {
-            const res = await fetch("http://89.167.122.76:4080/tasks/templates/");
+            const res = await fetch("https://api.trypranaextract.com/tasks/templates/");
             if (res.ok) {
                 const data = await res.json();
                 setTemplates(data);
@@ -1921,7 +1926,7 @@ function CalendarTab() {
 
     const fetchZones = async () => {
         try {
-            const res = await fetch("http://89.167.122.76:4080/locations/zones/");
+            const res = await fetch("https://api.trypranaextract.com/locations/zones/");
             if (res.ok) setZones(await res.json());
         } catch (e) {
             console.error(e);
@@ -1930,7 +1935,7 @@ function CalendarTab() {
 
     const fetchOverdue = async () => {
         try {
-            const res = await fetch("http://89.167.122.76:4080/dashboard/");
+            const res = await fetch("https://api.trypranaextract.com/dashboard/");
             if (res.ok) {
                 const data = await res.json();
                 setOverdueTasks(data.overdue_tasks_list || []);
@@ -1977,7 +1982,7 @@ function CalendarTab() {
                 photo_required: false,
                 next_execution_date: selectedDate.toISOString()
             };
-            const res = await fetch("http://89.167.122.76:4080/tasks/templates/", {
+            const res = await fetch("https://api.trypranaextract.com/tasks/templates/", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
@@ -2013,7 +2018,7 @@ function CalendarTab() {
                 photo_required: tmpl.photo_required,
                 next_execution_date: selectedDate.toISOString()
             };
-            const res = await fetch(`http://89.167.122.76:4080/tasks/templates/${tmpl.id}`, {
+            const res = await fetch(`https://api.trypranaextract.com/tasks/templates/${tmpl.id}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
@@ -2032,7 +2037,7 @@ function CalendarTab() {
     const handleEditSave = async (updatedTask: any) => {
         setIsSubmitting(true);
         try {
-            const res = await fetch(`http://89.167.122.76:4080/tasks/templates/${editingTask.id}`, {
+            const res = await fetch(`https://api.trypranaextract.com/tasks/templates/${editingTask.id}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(updatedTask)

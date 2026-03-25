@@ -8,7 +8,7 @@ const navItems = [
   { label: "Calendar", path: "/calendar", icon: Calendar },
   { label: "Tasks", path: "/tasks", icon: CheckSquare },
   { label: "Staff", path: "/stats", icon: BarChart3 },
-  { label: "AI Recommendations", path: "/ai", icon: BrainCircuit },
+  { label: "AI Review", path: "/ai", icon: BrainCircuit },
 ];
 
 export function AppSidebar() {

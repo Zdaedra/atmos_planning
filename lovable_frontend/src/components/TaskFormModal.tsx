@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,12 @@ export default function TaskFormModal({ trigger, task }: { trigger: React.ReactN
     const [photoRequired, setPhotoRequired] = useState(task?.photo_required || false);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
+    useEffect(() => {
+        if (repeatType !== "daily" && timeOfDay === "anytime") {
+            setTimeOfDay("1");
+        }
+    }, [repeatType, timeOfDay]);
+
     const queryClient = useQueryClient();
 
     const handleOpenChange = (newOpen: boolean) => {
@@ -60,6 +66,11 @@ export default function TaskFormModal({ trigger, task }: { trigger: React.ReactN
             return;
         }
 
+        if (repeatType !== "daily" && timeOfDay === "anytime") {
+            alert("Please select Shift 1 or Shift 2 for this task type.");
+            return;
+        }
+
         setIsSubmitting(true);
         try {
             const payload = {
@@ -69,10 +80,10 @@ export default function TaskFormModal({ trigger, task }: { trigger: React.ReactN
                 time_of_day: timeOfDay,
                 zone_id: task?.zone_id || 1, // Default to 1
                 photo_required: photoRequired,
-                next_execution_date: nextExecutionDate ? new Date(nextExecutionDate + "T00:00:00").toISOString() : null
+                next_execution_date: nextExecutionDate ? nextExecutionDate + "T00:00:00Z" : null
             };
 
-            const url = task ? `http://89.167.122.76:4080/tasks/templates/${task.id}` : "http://89.167.122.76:4080/tasks/templates/";
+            const url = task ? `https://api.trypranaextract.com/tasks/templates/${task.id}` : "https://api.trypranaextract.com/tasks/templates/";
             const method = task ? "PUT" : "POST";
 
             const res = await fetch(url, {
@@ -86,6 +97,7 @@ export default function TaskFormModal({ trigger, task }: { trigger: React.ReactN
 
             if (res.ok) {
                 queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
                 setOpen(false);
             } else {
                 const err = await res.json();
@@ -129,13 +141,13 @@ export default function TaskFormModal({ trigger, task }: { trigger: React.ReactN
                         </Select>
                     </div>
                     <div>
-                        <Label>Time of Day</Label>
+                        <Label>Shift / Time of Day</Label>
                         <Select value={timeOfDay} onValueChange={setTimeOfDay}>
                             <SelectTrigger className="mt-1"><SelectValue placeholder="Select" /></SelectTrigger>
                             <SelectContent>
-                                <SelectItem value="morning">Morning (Утро)</SelectItem>
-                                <SelectItem value="evening">Evening (Вечер)</SelectItem>
-                                <SelectItem value="anytime">Anytime (Любое время)</SelectItem>
+                                <SelectItem value="1">Shift 1 (Смена 1)</SelectItem>
+                                <SelectItem value="2">Shift 2 (Смена 2)</SelectItem>
+                                <SelectItem value="anytime">Anytime (Любое время - Daily only)</SelectItem>
                             </SelectContent>
                         </Select>
                     </div>
@@ -155,7 +167,7 @@ export default function TaskFormModal({ trigger, task }: { trigger: React.ReactN
                             <Button variant="destructive" className="flex-1" onClick={async () => {
                                 if (confirm("Are you sure?")) {
                                     try {
-                                        const res = await fetch(`http://89.167.122.76:4080/tasks/templates/${task.id}`, {
+                                        const res = await fetch(`https://api.trypranaextract.com/tasks/templates/${task.id}`, {
                                             method: "DELETE",
                                             headers: { "Authorization": `Bearer ${localStorage.getItem('access_token')}` }
                                         });

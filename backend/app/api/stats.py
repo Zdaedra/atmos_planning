@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
 from app.core.database import get_db
-from app.models.all import Task, User, Zone
+from app.models.all import Task, User, Zone, Shift
 
 router = APIRouter()
 
@@ -25,6 +25,8 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
         start_date = now - timedelta(days=7)
         
     start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = now + timedelta(days=1)
+    end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # All supervisors and garden supervisors
     users = db.query(User).filter(User.role.in_(["supervisor", "garden supervisor"])).all()
@@ -33,6 +35,8 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
             "user_id": u.id,
             "name": u.name,
             "role": u.role,
+            "email": u.email,
+            "plain_password": getattr(u, "plain_password", None),
             "is_active": getattr(u, "is_active", True),
             "shifts_count": 0,
             "_distinct_days": set(),
@@ -45,17 +49,32 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
     }
 
     from app.models.all import TaskTemplate
-    tasks = db.query(Task, TaskTemplate.repeat_type).join(
+    tasks = db.query(Task, TaskTemplate.repeat_type, TaskTemplate.time_of_day).join(
         TaskTemplate, Task.template_id == TaskTemplate.id, isouter=True
     ).filter(
         Task.scheduled_date >= start_date,
-        Task.status.in_(["Completed", "Overdue"])
+        Task.scheduled_date < end_date
     ).all()
+
+    # Pre-fetch shifts to map Unassigned tasks to all active shift supervisors
+    active_shifts = db.query(Shift).filter(
+        Shift.start_time >= start_date,
+        Shift.start_time < end_date
+    ).all()
+    shifts_by_date = {}
+    shift_numbers_by_user_date = {}
+    for s in active_shifts:
+        if s.start_time:
+            ds = s.start_time.strftime("%Y-%m-%d")
+            shifts_by_date.setdefault(ds, set()).add(s.user_id)
+            shift_numbers_by_user_date.setdefault(ds, {})[s.user_id] = s.shift_number
+            if s.user_id in user_map:
+                user_map[s.user_id]["_distinct_days"].add(ds) # Phase 67: Register explicit shift record
 
     global_failed = 0
     global_completed = 0
 
-    for t, repeat_type in tasks:
+    for t, repeat_type, time_of_day in tasks:
         r_type = (repeat_type or "none").lower()
         if r_type in ["weekly", "biweekly", "monthly", "planned", "bi-weekly"]:
             r_type = "planned"
@@ -65,24 +84,34 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
             r_type = "assigned"
             
         is_completed = t.status == "Completed"
-        is_overdue = t.status == "Overdue"
         
+        d_str = t.scheduled_date.strftime("%Y-%m-%d") if t.scheduled_date else None
+        
+        target_uids = set()
+        if t.assigned_user:
+            target_uids.add(t.assigned_user)
+        elif d_str and d_str in shifts_by_date:
+            target_uids.update(shifts_by_date[d_str])
+            
+        actual_uids = set()
+        task_shift = str(time_of_day).lower() if time_of_day else "anytime"
+        for uid in target_uids:
+            if task_shift in ["1", "2"] and d_str in shift_numbers_by_user_date and uid in shift_numbers_by_user_date[d_str]:
+                user_shift = str(shift_numbers_by_user_date[d_str][uid])
+                if task_shift != user_shift:
+                    continue
+            actual_uids.add(uid)
+            
         if is_completed:
             global_completed += 1
-            uid = t.assigned_user
-            if uid and uid in user_map:
-                user_map[uid][r_type]["completed"] += 1
-                if t.scheduled_date:
-                    user_map[uid]["_distinct_days"].add(t.scheduled_date.strftime("%Y-%m-%d"))
-                    
-        elif is_overdue:
+            for uid in actual_uids:
+                if uid in user_map:
+                    user_map[uid][r_type]["completed"] += 1
+        else:
             global_failed += 1
-            uid = t.assigned_user
-            # Only count as a personal failure if explicitly assigned
-            if uid and uid in user_map:
-                user_map[uid][r_type]["failed"] += 1
-                if t.scheduled_date:
-                    user_map[uid]["_distinct_days"].add(t.scheduled_date.strftime("%Y-%m-%d"))
+            for uid in actual_uids:
+                if uid in user_map:
+                    user_map[uid][r_type]["failed"] += 1
 
     personnel = []
     for uid, data in user_map.items():
@@ -128,21 +157,29 @@ def get_supervisor_details(user_id: int, timeframe: str = "week", db: Session = 
         start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
     else:
         start_date = now - timedelta(days=7)
-        
     start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = now + timedelta(days=1)
+    end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # All completed tasks for this user in timeframe
-    completed_tasks = db.query(Task).filter(
-        Task.assigned_user == user_id,
-        Task.status == "Completed",
-        Task.scheduled_date >= start_date
+    # Get valid shift dates for this user
+    active_shifts = db.query(Shift).filter(
+        Shift.user_id == user_id,
+        Shift.start_time >= start_date,
+        Shift.start_time < end_date
     ).all()
+    valid_shift_dates = {s.start_time.strftime("%Y-%m-%d") for s in active_shifts if s.start_time}
 
-    total_completed = len(completed_tasks)
+    from sqlalchemy import or_
+    all_potential_tasks = db.query(Task).options(joinedload(Task.template)).filter(
+        or_(Task.assigned_user == user_id, Task.assigned_user == None),
+        Task.scheduled_date >= start_date,
+        Task.scheduled_date < end_date
+    ).order_by(Task.scheduled_date.desc()).all()
+
+    completed_tasks = []
+    failed_tasks = []
     
-    # Shifts per Period (Unique Days)
     distinct_days = set()
-    # Time series for Recharts
     daily_map = {}
     
     if timeframe == "month":
@@ -162,18 +199,32 @@ def get_supervisor_details(user_id: int, timeframe: str = "week", db: Session = 
         d_str = (chart_start + timedelta(days=i)).strftime("%Y-%m-%d")
         daily_map[d_str] = 0
 
-    failed_tasks = db.query(Task).filter(
-        Task.assigned_user == user_id,
-        Task.status.in_(["Overdue", "Failed"]),
-        Task.scheduled_date >= start_date
-    ).order_by(Task.scheduled_date.desc()).limit(10).all()
+    for t in all_potential_tasks:
+        d_str = t.scheduled_date.strftime("%Y-%m-%d") if t.scheduled_date else None
+        
+        # If unassigned and not on a shift day, skip
+        if not t.assigned_user and d_str not in valid_shift_dates:
+            continue
+            
+        if t.status == "Completed":
+            completed_tasks.append(t)
+            if d_str and d_str in daily_map:
+                daily_map[d_str] += 1
+        else:
+            failed_tasks.append(t)
 
+    # Phase 67: Explicit actual mapping
+    distinct_days = valid_shift_dates
+
+    total_completed = len(completed_tasks)
+    
+    # recent_tasks should only take top 10 failed tasks
+    recent_failed = failed_tasks[:10]
     recent_tasks = [{
         "id": t.id,
         "name": t.template.name if t.template else f"Task #{t.id}",
         "date": t.scheduled_date.isoformat() if t.scheduled_date else None
-    } for t in failed_tasks]
-
+    } for t in recent_failed]
 
     # Format the chart data
     chart_data = [{"date": k, "completed": v} for k, v in sorted(daily_map.items())]
@@ -186,6 +237,8 @@ def get_supervisor_details(user_id: int, timeframe: str = "week", db: Session = 
             "id": user.id,
             "name": user.name,
             "role": user.role,
+            "email": user.email,
+            "plain_password": getattr(user, "plain_password", None),
             "last_login": user.last_login.isoformat() if user.last_login else None
         },
         "kpis": {
@@ -212,15 +265,45 @@ def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = De
         start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
     else:
         start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
-        
     start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = now + timedelta(days=1)
+    end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
+    from sqlalchemy import or_
     tasks_by_user = db.query(Task).options(joinedload(Task.template), joinedload(Task.photos)).filter(
-        Task.assigned_user == user_id,
-        Task.scheduled_date >= start_date
+        or_(Task.assigned_user == user_id, Task.assigned_user == None),
+        Task.scheduled_date >= start_date,
+        Task.scheduled_date < end_date
     ).order_by(Task.scheduled_date.desc()).all()
 
+    # Get valid dates where user actually started a shift
+    valid_shift_dates = set()
+    shift_numbers_by_date = {}
+    shift_coords_by_date = {}
+    actual_shifts = db.query(Shift).filter(
+        Shift.user_id == user_id,
+        Shift.start_time >= start_date,
+        Shift.start_time < end_date
+    ).all()
+    for s in actual_shifts:
+        if s.start_time:
+            ds = s.start_time.strftime("%Y-%m-%d")
+            valid_shift_dates.add(ds)
+            shift_numbers_by_date[ds] = str(s.shift_number)
+            shift_coords_by_date[ds] = {"latitude": s.latitude, "longitude": s.longitude}
+
     shift_map = {}
+    for d_str in valid_shift_dates:
+        shift_map[d_str] = {
+            "date": d_str,
+            "latitude": shift_coords_by_date.get(d_str, {}).get("latitude"),
+            "longitude": shift_coords_by_date.get(d_str, {}).get("longitude"),
+            "daily": {"completed": 0, "failed": 0, "failed_percent": 0},
+            "planned": {"completed": 0, "failed": 0, "failed_percent": 0},
+            "project": {"completed": 0, "failed": 0, "failed_percent": 0},
+            "assigned": {"completed": 0, "failed": 0, "failed_percent": 0},
+            "tasks": []
+        }
     
     for t in tasks_by_user:
         if not t.scheduled_date:
@@ -228,19 +311,18 @@ def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = De
             
         d_str = t.scheduled_date.strftime("%Y-%m-%d")
         
-        if d_str not in shift_map:
-            shift_map[d_str] = {
-                "date": d_str,
-                "daily": {"completed": 0, "failed": 0, "failed_percent": 0},
-                "planned": {"completed": 0, "failed": 0, "failed_percent": 0},
-                "project": {"completed": 0, "failed": 0, "failed_percent": 0},
-                "assigned": {"completed": 0, "failed": 0, "failed_percent": 0},
-                "tasks": []
-            }
+        # Only show days the supervisor actually worked a shift
+        if d_str not in valid_shift_dates:
+            continue
             
         r_type = ""
+        task_shift = "anytime"
         if t.template:
             r_type = (t.template.repeat_type or "").lower()
+            task_shift = str(t.template.time_of_day).lower() if t.template.time_of_day else "anytime"
+            
+        if task_shift in ["1", "2"] and task_shift != shift_numbers_by_date.get(d_str, "1"):
+            continue
             
         if r_type in ["weekly", "biweekly", "bi-weekly", "monthly"]:
             r_type = "planned"
@@ -250,11 +332,10 @@ def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = De
             r_type = "assigned"
             
         is_completed = t.status == "Completed"
-        is_overdue = t.status == "Overdue" or t.status == "Failed"
         
         if is_completed:
             shift_map[d_str][r_type]["completed"] += 1
-        elif is_overdue:
+        else:
             shift_map[d_str][r_type]["failed"] += 1
             
         shift_map[d_str]["tasks"].append({
@@ -275,8 +356,8 @@ def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = De
             total_tasks += total
             data[cat]["failed_percent"] = round((f / total * 100)) if total > 0 else 0
             
-        if total_tasks > 0:
-            shifts.append(data)
+        # Phase 67: Always append shift even if total_tasks == 0
+        shifts.append(data)
             
     shifts = sorted(shifts, key=lambda x: x["date"], reverse=True)
     return shifts

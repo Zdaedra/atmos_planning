@@ -23,18 +23,36 @@ export default function LoginPage() {
     setError("");
 
     try {
+      let deviceId = localStorage.getItem("device_id");
+      if (!deviceId) {
+        deviceId = typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+          });
+        localStorage.setItem("device_id", deviceId);
+      }
+
       const formData = new URLSearchParams();
       formData.append('username', email);
       formData.append('password', password);
+      formData.append('client_id', deviceId); // Phase 79 Device Binding
 
-      const res = await fetch("http://89.167.122.76:4080/auth/login", {
+      const res = await fetch("https://api.trypranaextract.com/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: formData,
       });
 
       if (!res.ok) {
-        throw new Error("Invalid email or password");
+        let errorMsg = "Invalid email or password";
+        try {
+          const errData = await res.json();
+          if (errData.detail) errorMsg = errData.detail;
+        } catch (e) { }
+        throw new Error(errorMsg);
       }
 
       const data = await res.json();

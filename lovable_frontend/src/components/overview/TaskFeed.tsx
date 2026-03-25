@@ -534,14 +534,13 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
                 </Select>
               </div>
               <div>
-                <Label>Time of Day</Label>
+                <Label>Shift / Time of Day</Label>
                 <Select value={editTime} onValueChange={setEditTime}>
                   <SelectTrigger className="mt-1"><SelectValue placeholder="Select" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="morning">Morning</SelectItem>
-                    <SelectItem value="afternoon">Afternoon</SelectItem>
-                    <SelectItem value="evening">Evening</SelectItem>
-                    <SelectItem value="anytime">Anytime</SelectItem>
+                    <SelectItem value="1">Shift 1</SelectItem>
+                    <SelectItem value="2">Shift 2</SelectItem>
+                    <SelectItem value="anytime">Anytime (Daily only)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

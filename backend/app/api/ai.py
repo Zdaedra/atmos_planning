@@ -124,32 +124,56 @@ async def verify_task_photos_ai(task_id: int):
         db.close()
 
 
-@router.get("/recommendations")
-def get_ai_recommendations(db: Session = Depends(get_db)):
+@router.get("/review-feed")
+def get_ai_review_feed(db: Session = Depends(get_db)):
     """
-    Returns tasks that have been 'flagged' by the AI for Admin review.
+    Returns tasks that were scheduled before today but are not completed.
+    Splits them into daily vs planned/project tasks.
     """
-    flagged_tasks = db.query(Task).filter(Task.ai_status == "flagged").order_by(Task.scheduled_date.desc()).all()
+    from datetime import datetime, timezone
     
-    result = []
-    for t in flagged_tasks:
-        photos = db.query(TaskPhoto).filter(TaskPhoto.task_id == t.id).all()
-        from app.models.all import User
-        user = db.query(User).filter(User.id == t.assigned_user).first()
+    now_utc = datetime.now(timezone.utc)
+    today_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
+    
+    # All overdue tasks
+    overdue_tasks = db.query(Task).filter(
+        Task.scheduled_date < today_start,
+        Task.status != "Completed"
+    ).order_by(Task.scheduled_date.asc()).all()
+    
+    daily_overdue = []
+    project_overdue = []
+    
+    from app.models.all import User
+    
+    for t in overdue_tasks:
         template = db.query(TaskTemplate).filter(TaskTemplate.id == t.template_id).first()
+        user = db.query(User).filter(User.id == t.assigned_user).first()
         
-        result.append({
+        days_overdue = (today_start - t.scheduled_date).days if t.scheduled_date else 0
+        if days_overdue < 1:
+            days_overdue = 1
+            
+        task_data = {
             "task_id": t.id,
-            "task_name": template.name if template else "Unknown Task",
+            "task_name": template.name if template else f"Task #{t.id}",
             "task_status": t.status,
-            "ai_status": t.ai_status,
-            "ai_reasoning": t.ai_reasoning,
             "assigned_user_name": user.name if user else "Unassigned",
+            "assigned_user_avatar": user.avatar_url if user and hasattr(user, 'avatar_url') else None,
             "scheduled_date": t.scheduled_date.isoformat() if t.scheduled_date else None,
-            "photos": [{"id": p.id, "url": p.url} for p in photos]
-        })
+            "days_overdue": days_overdue,
+        }
         
-    return result
+        if template and template.repeat_type == "daily":
+            daily_overdue.append(task_data)
+        else:
+            project_overdue.append(task_data)
+            
+    return {
+        "daily": daily_overdue,
+        "planned": project_overdue
+    }
+
 
 @router.post("/{task_id}/resolve")
 def resolve_ai_flag(task_id: int, action: str, db: Session = Depends(get_db)):
@@ -173,61 +197,61 @@ def resolve_ai_flag(task_id: int, action: str, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success", "task_id": task_id, "ai_status": task.ai_status, "task_status": task.status}
 
+
 @router.get("/insights")
 async def generate_staff_insights(db: Session = Depends(get_db)):
     """
-    On-demand AI generation of staff recommendations based on recent task validations.
+    Generates AI insights based on the OVERDUE tasks (what is not being done).
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
     
-    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
-    recent_tasks = db.query(Task).filter(Task.scheduled_date >= seven_days_ago, Task.status == "Completed").all()
+    now_utc = datetime.now(timezone.utc)
+    today_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
     
-    if not recent_tasks:
-        return {"insights": ["Not enough data in the last 7 days to generate meaningful insights."]}
+    overdue_tasks = db.query(Task).filter(
+        Task.scheduled_date < today_start,
+        Task.status != "Completed"
+    ).all()
+    
+    if not overdue_tasks:
+        return {"insights": ["Все задачи выполняются вовремя. Отличная работа!"]}
         
-    # Group by user
     class UserStat:
         def __init__(self, name: str):
             self.name = name
-            self.total = 0
-            self.flagged = 0
-            self.reasons = []
+            self.daily_missed = 0
+            self.planned_missed = 0
             
     user_stats: dict[int, UserStat] = {}
     from app.models.all import User
     
-    for t in recent_tasks:
-        if not t.assigned_user:
-            continue
+    for t in overdue_tasks:
+        uid = t.assigned_user or 0
+        if uid not in user_stats:
+            u = db.query(User).filter(User.id == uid).first()
+            user_stats[uid] = UserStat(u.name if u else "Unassigned")
             
-        if t.assigned_user not in user_stats:
-            u = db.query(User).filter(User.id == t.assigned_user).first()
-            user_stats[t.assigned_user] = UserStat(u.name if u else f"User {t.assigned_user}")
+        template = db.query(TaskTemplate).filter(TaskTemplate.id == t.template_id).first()
+        is_daily = template and template.repeat_type == "daily"
+        
+        if is_daily:
+            user_stats[uid].daily_missed += 1
+        else:
+            user_stats[uid].planned_missed += 1
             
-        user_stats[t.assigned_user].total += 1
-        if t.ai_status == "flagged":
-            user_stats[t.assigned_user].flagged += 1
-            if t.ai_reasoning:
-                user_stats[t.assigned_user].reasons.append(t.ai_reasoning)
-                
-    # Build prompt
-    summary_text = "Weekly Staff Performance Summary:\n"
+    summary_text = "Сводка просроченных задач по персоналу (на сегодня):\n"
     for uid, stats in user_stats.items():
-        summary_text += f"- {stats.name}: {stats.total} tasks completed, {stats.flagged} flagged by AI.\n"
-        if stats.reasons:
-            # Take a sample of reasons to avoid token bloat
-            sample_reasons = stats.reasons[:5]
-            summary_text += f"  Common flagged issues: {', '.join(sample_reasons)}\n"
+        summary_text += f"- Сотрудник: {stats.name} | Ежедневных просрочено: {stats.daily_missed} | Проектных просрочено: {stats.planned_missed}\n"
             
     m = [
         {
             "role": "system",
             "content": (
-                "You are an expert HR and Operations AI assistant. "
-                "Analyze the provided weekly task performance data for the staff. "
-                "Look for negative trends (e.g., high flag rates, recurring specific issues) and positive patterns. "
-                "Return exactly 3-4 concise, actionable insight bullet points for the manager. "
+                "You are an expert HR and Operations AI assistant for a hotel/facility manager. "
+                "Analyze the provided list of overdue/missed tasks. "
+                "Highlight critical bottlenecks, who is struggling the most, and formulate exactly "
+                "3-4 concise, actionable insight bullet points FOR THE MANAGER IN RUSSIAN language. "
+                "For example: 'Алексею нужно напомнить про ежедневки, они копятся уже 3 дня.' "
                 "Do not include pleasantries. Return ONLY valid JSON: {'insights': ['insight 1', 'insight 2', ...]}"
             )
         },
@@ -247,7 +271,7 @@ async def generate_staff_insights(db: Session = Depends(get_db)):
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
-                    "model": "gpt-4o-mini", # Used mini for faster/cheaper text analysis
+                    "model": "gpt-4o-mini",
                     "messages": m,
                     "response_format": {"type": "json_object"},
                     "max_tokens": 500,
@@ -258,6 +282,7 @@ async def generate_staff_insights(db: Session = Depends(get_db)):
             if response.status_code == 200:
                 result_json = response.json()
                 content = result_json["choices"][0]["message"]["content"]
+                import json
                 parsed = json.loads(content)
                 return {"insights": parsed.get("insights", ["No insights could be parsed."])}
             else:

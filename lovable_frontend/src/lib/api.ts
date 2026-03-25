@@ -1,4 +1,4 @@
-const API_URL = "http://89.167.122.76:4080";
+const API_URL = "https://api.trypranaextract.com";
 
 export const getAuthToken = () => localStorage.getItem("access_token");
 
@@ -44,7 +44,7 @@ export const fetchSupervisors = async () => {
 
 export const fetchTaskTemplates = async () => {
     // In our backend, these are generic tasks/templates.
-    return request("/tasks/templates");
+    return request("/tasks/templates/");
 };
 
 export const markTaskComplete = async (payload: { task_id: number; comments?: string; photo_data_base64?: string | null }) => {

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { Play, CheckCircle2, Bell, User, Clock, MapPin, Camera, CheckSquare, ChevronRight, MessageSquare, X, Calendar, LogIn } from "lucide-react";
+import { Play, CheckCircle2, Bell, User, Clock, MapPin, Camera, CheckSquare, ChevronRight, MessageSquare, X, Calendar, LogIn, Briefcase } from "lucide-react";
 import ReactCalendar from 'react-calendar';
 import 'react-calendar/dist/Calendar.css';
 
@@ -43,8 +43,13 @@ export default function SupervisorDashboard() {
     const [activeSubTab, setActiveSubTab] = useState<"assigned" | "daily" | "planned" | "projects" | "overdue" | "failed">("assigned");
     const [selectedFutureDate, setSelectedFutureDate] = useState<string>(new Date().toISOString().split('T')[0]);
     const [templates, setTemplates] = useState<TaskTemplate[]>([]);
+    const [calendarMap, setCalendarMap] = useState<Record<string, any[]>>({});
     const [messages, setMessages] = useState<any[]>([]);
     const [isInboxOpen, setIsInboxOpen] = useState(false);
+
+    // Phase 67 Shift Session Management
+    const [showShiftModal, setShowShiftModal] = useState(false);
+    const [activeShiftId, setActiveShiftId] = useState<number | null>(null);
 
     useEffect(() => {
         let isMounted = true;
@@ -57,7 +62,7 @@ export default function SupervisorDashboard() {
 
             try {
                 setLoadingStep("Fetching /auth/me...");
-                const userRes = await fetch(`http://89.167.122.76:4080/auth/me?_cb=${Date.now()}`, {
+                const userRes = await fetch(`https://api.trypranaextract.com/auth/me?_cb=${Date.now()}`, {
                     headers: { "Authorization": `Bearer ${token}` }
                 });
 
@@ -69,22 +74,41 @@ export default function SupervisorDashboard() {
                 const userData = await userRes.json();
 
                 setLoadingStep(`Fetching /tasks/user/${userData.id}...`);
-                const tasksRes = await fetch(`http://89.167.122.76:4080/tasks/user/${userData.id}`);
+                const tasksRes = await fetch(`https://api.trypranaextract.com/tasks/user/${userData.id}`);
                 const tasksData = tasksRes.ok ? await tasksRes.json() : [];
 
                 setLoadingStep("Fetching /tasks/templates/...");
-                const defaultTemplatesRes = await fetch(`http://89.167.122.76:4080/tasks/templates/`);
-                const templatesData = defaultTemplatesRes.ok ? await defaultTemplatesRes.json() : [];
+                const defaultTemplatesRes = await fetch(`https://api.trypranaextract.com/tasks/templates/`);
+                const templatesDataRaw = defaultTemplatesRes.ok ? await defaultTemplatesRes.json() : [];
+                const templatesData = templatesDataRaw.filter((t: any) => t.default_assigned_user === userData.id || t.default_assigned_user === null);
 
                 setLoadingStep("Fetching /messages/user...");
-                const msgsRes = await fetch(`http://89.167.122.76:4080/messages/user/${userData.id}?unread_only=true`);
+                const msgsRes = await fetch(`https://api.trypranaextract.com/messages/user/${userData.id}?unread_only=true`);
                 const msgsData = msgsRes.ok ? await msgsRes.json() : [];
+
+                setLoadingStep("Fetching /tasks/calendar...");
+                const startD = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toISOString().split('T')[0];
+                const endD = new Date(new Date().getFullYear(), new Date().getMonth() + 2, 0).toISOString().split('T')[0];
+                const calRes = await fetch(`https://api.trypranaextract.com/tasks/calendar?start_date=${startD}&end_date=${endD}&user_id=${userData.id}`);
+                const calMapData = calRes.ok ? await calRes.json() : {};
+
+                setLoadingStep("Fetching active shifts...");
+                const activeShiftsRes = await fetch(`https://api.trypranaextract.com/shifts/active`);
+                const activeShiftsData = activeShiftsRes.ok ? await activeShiftsRes.json() : [];
+                const matchedShift = activeShiftsData.find((s: any) => String(s.user_id) === String(userData.id));
 
                 if (isMounted) {
                     setUser(userData);
                     setTasks(tasksData);
                     setTemplates(templatesData);
                     setMessages(msgsData);
+                    setCalendarMap(calMapData);
+
+                    if (matchedShift) {
+                        setActiveShiftId(matchedShift.id);
+                    } else if (sessionStorage.getItem('visiting') !== 'true') {
+                        setShowShiftModal(true);
+                    }
                 }
             } catch (e: any) {
                 console.error("Failed to load dashboard data", e);
@@ -102,18 +126,94 @@ export default function SupervisorDashboard() {
     useEffect(() => {
         if (!user || (!user.id)) return;
         const interval = setInterval(() => {
-            fetch(`http://89.167.122.76:4080/tasks/user/${user.id}`)
+            fetch(`https://api.trypranaextract.com/tasks/user/${user.id}`)
                 .then(r => r.json())
                 .then(data => setTasks(data))
                 .catch(e => console.error(e));
 
-            fetch(`http://89.167.122.76:4080/messages/user/${user.id}?unread_only=true`)
+            fetch(`https://api.trypranaextract.com/messages/user/${user.id}?unread_only=true`)
                 .then(r => r.json())
                 .then(data => setMessages(data))
                 .catch(e => console.error(e));
         }, 15000);
         return () => clearInterval(interval);
     }, [user]);
+
+    const [locError, setLocError] = useState<string | null>(null);
+
+    const handleStartShift = async (shiftNumber: number) => {
+        if (!user) return;
+        setStartingShift(true);
+        setLocError(null);
+
+        const callApi = async (lat: number | null, lng: number | null) => {
+            try {
+                const res = await fetch(`https://api.trypranaextract.com/shifts/start`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        user_id: user.id,
+                        shift_number: shiftNumber,
+                        latitude: lat,
+                        longitude: lng
+                    })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    setActiveShiftId(data.id);
+                    setShowShiftModal(false);
+                } else {
+                    setLocError(data.detail || "Failed to start shift.");
+                }
+            } catch (e) {
+                console.error(e);
+                setLocError("Network error while connecting to server.");
+            } finally {
+                setStartingShift(false);
+            }
+        };
+
+        if (!navigator.geolocation) {
+            setLocError("Geolocation is not supported by your browser.");
+            setStartingShift(false);
+            return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+            (position) => callApi(position.coords.latitude, position.coords.longitude),
+            (err) => {
+                console.error(err);
+                if (err.code === err.PERMISSION_DENIED || window.location.protocol !== 'https:') {
+                    setLocError("Location access denied! To fix this: \n1. Open your phone's Settings app.\n2. Go to Safari (or Chrome).\n3. Tap 'Location' and select 'Ask' or 'Allow'.\nIf you're accessing via HTTP, your browser might block location permanently. You can bypass this temporarily below.");
+                } else {
+                    setLocError("Failed to retrieve geolocation. Please try again.");
+                }
+                setStartingShift(false);
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
+    };
+
+    const handleVisitOnly = () => {
+        sessionStorage.setItem("visiting", "true");
+        setShowShiftModal(false);
+    };
+
+    const handleEndShift = async () => {
+        if (!activeShiftId) return;
+        if (!confirm("Are you sure you're ready to END your shift?")) return;
+        try {
+            const res = await fetch(`https://api.trypranaextract.com/shifts/${activeShiftId}/end`, {
+                method: "POST"
+            });
+            if (res.ok) {
+                setActiveShiftId(null);
+                setShowShiftModal(true); // Prompts them again securely if they don't explicitly log out
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    };
 
     const [uploading, setUploading] = useState<number | null>(null);
 
@@ -127,7 +227,7 @@ export default function SupervisorDashboard() {
             formData.append("file", file);
 
             // POST to existing backend Media route
-            const res = await fetch(`http://89.167.122.76:4080/media/upload?task_id=${taskId}&user_id=${user?.id || 1}&zone_id=${zoneId}`, {
+            const res = await fetch(`https://api.trypranaextract.com/media/upload?task_id=${taskId}&user_id=${user?.id || 1}&zone_id=${zoneId}`, {
                 method: "POST",
                 body: formData
             });
@@ -174,7 +274,7 @@ export default function SupervisorDashboard() {
     const handleMarkMessageRead = async (msgId: number) => {
         const token = localStorage.getItem("access_token");
         try {
-            const res = await fetch(`http://89.167.122.76:4080/messages/${msgId}/read`, {
+            const res = await fetch(`https://api.trypranaextract.com/messages/${msgId}/read`, {
                 method: "PATCH",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -208,7 +308,7 @@ export default function SupervisorDashboard() {
                 queryParams.append("user_id", user.id.toString());
             }
 
-            const res = await fetch(`http://89.167.122.76:4080/tasks/${taskId}/status?${queryParams.toString()}`, { method: "PATCH" });
+            const res = await fetch(`https://api.trypranaextract.com/tasks/${taskId}/status?${queryParams.toString()}`, { method: "PATCH" });
             if (res.ok) {
                 setTasks(tasks.map(t => t.id === taskId ? { ...t, status: "Completed" } : t));
                 setViewingTask(null);
@@ -225,7 +325,7 @@ export default function SupervisorDashboard() {
         if (!confirm("Are you sure you want to delete this photo?")) return;
 
         try {
-            const res = await fetch(`http://89.167.122.76:4080/media/upload/${photoId}`, {
+            const res = await fetch(`https://api.trypranaextract.com/media/upload/${photoId}`, {
                 method: "DELETE"
             });
 
@@ -304,111 +404,19 @@ export default function SupervisorDashboard() {
     };
 
     const completedTasks = sortTasksByTime(tasks.filter(t => t.status === "Completed"));
-    const dailyTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && !isTaskOverdue(t) && isTodayOrPast(t) && t.template?.repeat_type?.toLowerCase() === 'daily'));
+    const dailyTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && isToday(t) && t.template?.repeat_type?.toLowerCase() === 'daily'));
     const plannedTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && !isTaskOverdue(t) && isTodayOrPast(t) && t.template?.repeat_type?.toLowerCase() !== 'daily' && t.template?.repeat_type?.toLowerCase() !== 'project'));
     const projectTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && !isTaskOverdue(t) && isTodayOrPast(t) && t.template?.repeat_type?.toLowerCase() === 'project'));
 
     const getTaskCountForDate = (date: Date) => {
-        const simTemplatesForDate = templates.filter(t => {
-            const rpt = (t.repeat_type || "daily").toLowerCase();
-            if (rpt === 'daily') return false; // Exclude daily from counts
-
-            const anchorDateStr = (t as any).next_execution_date;
-            if (!anchorDateStr) return false;
-
-            const [aY, aM, aD] = anchorDateStr.split('T')[0].split('-');
-            const anchorD = new Date(Number(aY), Number(aM) - 1, Number(aD));
-
-            const futureTime = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-            const anchorTime = new Date(anchorD.getFullYear(), anchorD.getMonth(), anchorD.getDate()).getTime();
-
-            if (rpt === 'project') {
-                return anchorD.getDate() === date.getDate() &&
-                    anchorD.getMonth() === date.getMonth() &&
-                    anchorD.getFullYear() === date.getFullYear();
-            }
-            if (rpt === 'weekly') {
-                return futureTime >= anchorTime && date.getDay() === anchorD.getDay();
-            }
-            if (rpt === 'biweekly') {
-                if (futureTime < anchorTime) return false;
-                const msPerDay = 24 * 60 * 60 * 1000;
-                const diffDays = Math.round((futureTime - anchorTime) / msPerDay);
-                return diffDays >= 0 && diffDays % 14 === 0;
-            }
-            if (rpt === 'monthly') {
-                if (futureTime < anchorTime) return false;
-                const msPerDay = 24 * 60 * 60 * 1000;
-                const diffDays = Math.round((futureTime - anchorTime) / msPerDay);
-                return diffDays >= 0 && diffDays % 28 === 0;
-            }
-            return false;
-        });
-
         const dateStr = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().split('T')[0];
-        const realOneOffs = tasks
-            .filter((t: any) => t.scheduled_date && t.scheduled_date.split('T')[0] === dateStr && t.template?.repeat_type?.toLowerCase() !== 'daily')
-            .map((t: any) => t.template)
-            .filter((tmpl: any) => tmpl && !simTemplatesForDate.some(sim => sim.id === tmpl.id));
-
-        return simTemplatesForDate.length + realOneOffs.length;
+        const dayTasks = calendarMap[dateStr] || [];
+        // Extract dynamically ignoring daily repeating blocks
+        return dayTasks.filter((t: any) => (t.repeat_type || "").toLowerCase() !== 'daily').length;
     };
 
-    // Calendar Simulation Math
-    const [selYear, selMonth, selDay] = selectedFutureDate.split('-');
-    const futureDateObj = new Date(Number(selYear), Number(selMonth) - 1, Number(selDay));
-
-    const simulatedTasksForDate = templates.filter(t => {
-        const rpt = (t.repeat_type || "daily").toLowerCase();
-
-        // Daily happens every single day
-        if (rpt === 'daily') return true;
-
-        // Missing anchor date? Can't simulate
-        const anchorDateStr = (t as any).next_execution_date;
-        if (!anchorDateStr) return false;
-
-        const [aY, aM, aD] = anchorDateStr.split('T')[0].split('-');
-        const anchorD = new Date(Number(aY), Number(aM) - 1, Number(aD));
-
-        // Normalize times to midnight for clean comparison
-        const futureTime = new Date(futureDateObj.getFullYear(), futureDateObj.getMonth(), futureDateObj.getDate()).getTime();
-        const anchorTime = new Date(anchorD.getFullYear(), anchorD.getMonth(), anchorD.getDate()).getTime();
-
-        if (rpt === 'project') {
-            return anchorD.getDate() === futureDateObj.getDate() &&
-                anchorD.getMonth() === futureDateObj.getMonth() &&
-                anchorD.getFullYear() === futureDateObj.getFullYear();
-        }
-
-        if (rpt === 'weekly') {
-            return futureTime >= anchorTime && futureDateObj.getDay() === anchorD.getDay();
-        }
-
-        if (rpt === 'biweekly') {
-            if (futureTime < anchorTime) return false;
-            const msPerDay = 24 * 60 * 60 * 1000;
-            const diffDays = Math.round((futureTime - anchorTime) / msPerDay);
-            return diffDays >= 0 && diffDays % 14 === 0;
-        }
-
-        if (rpt === 'monthly') {
-            if (futureTime < anchorTime) return false;
-            const msPerDay = 24 * 60 * 60 * 1000;
-            const diffDays = Math.round((futureTime - anchorTime) / msPerDay);
-            return diffDays >= 0 && diffDays % 28 === 0;
-        }
-
-        return false;
-    });
-
-    // Merge manual one-off task assignments from the DB that exist for this date but aren't mathematically simulated
-    const realOneOffTemplates = tasks
-        .filter((t: any) => t.scheduled_date && t.scheduled_date.split('T')[0] === selectedFutureDate && t.template?.repeat_type?.toLowerCase() !== 'daily')
-        .map((t: any) => t.template)
-        .filter((tmpl: any) => tmpl && !simulatedTasksForDate.some(sim => sim.id === tmpl.id));
-
-    const combinedSimulations = [...simulatedTasksForDate, ...realOneOffTemplates];
+    // Calendar Simulation Math using Unified Backend
+    const combinedSimulations = calendarMap[selectedFutureDate] || [];
 
     const simDaily = sortTasksByTime(combinedSimulations.filter(t => (t.repeat_type || "daily").toLowerCase() === 'daily'));
     const simPlanned = sortTasksByTime(combinedSimulations.filter(t => ["weekly", "biweekly", "monthly"].includes((t.repeat_type || "").toLowerCase())));
@@ -416,6 +424,60 @@ export default function SupervisorDashboard() {
 
     return (
         <div style={{ maxWidth: "800px", margin: "0 auto", padding: "24px", minHeight: "100vh", background: "var(--background)" }}>
+            {/* SHIFT MODAL */}
+            {showShiftModal && (
+                <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.8)", zIndex: 1000, display: "flex", justifyContent: "center", alignItems: "center", padding: "20px", backdropFilter: "blur(4px)" }}>
+                    <div style={{ background: "var(--card)", padding: "30px", borderRadius: "24px", width: "100%", maxWidth: "400px", display: "flex", flexDirection: "column", gap: "20px", boxShadow: "0 25px 50px -12px rgba(0,0,0,0.25)", animation: "fadeIn 0.3s ease" }}>
+                        <div style={{ textAlign: "center" }}>
+                            <div style={{ width: "64px", height: "64px", background: "rgba(16, 185, 129, 0.1)", borderRadius: "32px", display: "flex", justifyContent: "center", alignItems: "center", margin: "0 auto 16px" }}>
+                                <Briefcase size={32} color="#10b981" />
+                            </div>
+                            <h2 style={{ margin: "0 0 8px 0", fontSize: "24px", fontWeight: "700" }}>Welcome, {user?.name || "User"}</h2>
+                            <p style={{ margin: 0, color: "var(--muted)", fontSize: "15px", lineHeight: 1.5 }}>You don't have an active shift. Let's get things moving!</p>
+                        </div>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginTop: "10px" }}>
+                            {locError && (
+                                <div style={{ padding: "12px", background: "rgba(239, 68, 68, 0.1)", color: "#ef4444", borderRadius: "12px", fontSize: "14px", fontWeight: "600", textAlign: "center", border: "1px solid rgba(239, 68, 68, 0.2)" }}>
+                                    {locError}
+                                </div>
+                            )}
+
+                            <div style={{ display: "flex", gap: "12px" }}>
+                                <button onClick={() => handleStartShift(1)} disabled={startingShift} style={{ flex: 1, background: "rgba(249, 115, 22, 0.1)", color: "#ea580c", border: "1px solid rgba(249, 115, 22, 0.2)", padding: "16px", borderRadius: "16px", fontSize: "16px", fontWeight: "600", cursor: "pointer", display: "flex", justifyContent: "center", alignItems: "center", gap: "8px", transition: "all 0.2s" }}>
+                                    {startingShift ? <div className="loading-spinner" style={{ width: "20px", height: "20px", borderWidth: "2px", borderColor: "#ea580c #ea580c transparent transparent" }} /> : <Play size={20} />}
+                                    Shift 1
+                                </button>
+                                <button onClick={() => handleStartShift(2)} disabled={startingShift} style={{ flex: 1, background: "rgba(99, 102, 241, 0.1)", color: "#4f46e5", border: "1px solid rgba(99, 102, 241, 0.2)", padding: "16px", borderRadius: "16px", fontSize: "16px", fontWeight: "600", cursor: "pointer", display: "flex", justifyContent: "center", alignItems: "center", gap: "8px", transition: "all 0.2s" }}>
+                                    {startingShift ? <div className="loading-spinner" style={{ width: "20px", height: "20px", borderWidth: "2px", borderColor: "#4f46e5 #4f46e5 transparent transparent" }} /> : <Play size={20} />}
+                                    Shift 2
+                                </button>
+                            </div>
+
+                            {locError && locError.includes("Location access denied") && (
+                                <button onClick={async () => {
+                                    setStartingShift(true);
+                                    try {
+                                        const res = await fetch(`https://api.trypranaextract.com/shifts/start`, {
+                                            method: "POST", headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({ user_id: user.id, shift_number: 1, latitude: null, longitude: null })
+                                        });
+                                        const data = await res.json();
+                                        if (res.ok) { setActiveShiftId(data.id); setShowShiftModal(false); } else { setLocError(data.detail); }
+                                    } finally { setStartingShift(false); }
+                                }} disabled={startingShift} style={{ background: "transparent", color: "var(--danger)", border: "1px dashed var(--danger)", padding: "12px", borderRadius: "12px", fontSize: "14px", fontWeight: "600", cursor: "pointer" }}>
+                                    Bypass Location (Force Start)
+                                </button>
+                            )}
+
+                            <button onClick={handleVisitOnly} disabled={startingShift} style={{ background: "transparent", color: "var(--muted)", border: "1px solid var(--border)", padding: "16px", borderRadius: "16px", fontSize: "16px", fontWeight: "600", cursor: "pointer", transition: "all 0.2s" }}>
+                                Just Visiting  👀
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* TOP HEADER */}
             <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "32px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
@@ -495,7 +557,7 @@ export default function SupervisorDashboard() {
                             />
                         </div>
 
-                        {simulatedTasksForDate.length === 0 ? (
+                        {combinedSimulations.length === 0 ? (
                             <div style={{ textAlign: "center", padding: "40px", color: "var(--muted)", background: "var(--card)", borderRadius: "20px", border: "1px solid var(--border)" }}>
                                 <Calendar size={48} style={{ opacity: 0.2, margin: "0 auto 16px ", display: "block" }} />
                                 <p style={{ fontSize: "16px" }}>No operations scheduled.</p>
@@ -520,14 +582,21 @@ export default function SupervisorDashboard() {
                                                 <div style={{ display: "flex", flexDirection: "column", gap: "12px", paddingLeft: "4px" }}>
                                                     {tasksArray.map((t, idx) => (
                                                         <div key={`sim-${label}-${idx}`} style={{ background: "var(--card)", padding: "16px", borderRadius: "20px", boxShadow: "0 4px 12px rgba(0,0,0,0.04)", border: "1px solid var(--border)" }}>
-                                                            <h4 style={{ margin: "0", fontSize: "17px", fontWeight: "600" }}>{t.name}</h4>
-                                                            <div style={{ display: 'flex', gap: '8px', marginTop: "8px" }}>
-                                                                {(t.time_of_day || 'anytime').toLowerCase() === 'morning' && (
-                                                                    <span style={{ fontSize: '11px', background: 'rgba(249, 115, 22, 0.1)', border: '1px solid rgba(249, 115, 22, 0.2)', color: '#ea580c', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Morning 🌅</span>
+                                                            <h4 style={{ margin: "0", fontSize: "17px", fontWeight: "600" }}>{t.template?.name || t.name || `Task #${t.id}`}</h4>
+                                                            <div style={{ display: 'flex', gap: '8px', marginTop: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                                                                {['1', 'morning', 'смена 1'].includes((t.template?.time_of_day || t.time_of_day || 'anytime').toLowerCase()) && (
+                                                                    <span style={{ fontSize: '11px', background: 'rgba(249, 115, 22, 0.1)', border: '1px solid rgba(249, 115, 22, 0.2)', color: '#ea580c', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Shift 1</span>
                                                                 )}
-                                                                {(t.time_of_day || 'anytime').toLowerCase() === 'evening' && (
-                                                                    <span style={{ fontSize: '11px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', color: '#4f46e5', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Evening 🌙</span>
+                                                                {['2', 'evening', 'смена 2'].includes((t.template?.time_of_day || t.time_of_day || 'anytime').toLowerCase()) && (
+                                                                    <span style={{ fontSize: '11px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', color: '#4f46e5', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Shift 2</span>
                                                                 )}
+                                                                <span style={{ fontSize: '11px', background: '#f8fafc', border: `1px solid #e2e8f0`, color: '#475569', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>
+                                                                    {(t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'daily' ? 'Daily' :
+                                                                        (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'weekly' ? 'Weekly' :
+                                                                            (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'biweekly' ? 'Bi-weekly' :
+                                                                                (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'monthly' ? 'Monthly' :
+                                                                                    (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'project' ? 'Project' : 'One-time'}
+                                                                </span>
                                                             </div>
                                                         </div>
                                                     ))}
@@ -619,11 +688,11 @@ export default function SupervisorDashboard() {
                                                     </h3>
 
                                                     <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '4px', marginTop: '8px' }}>
-                                                        {(task.template?.time_of_day || 'anytime').toLowerCase() === 'morning' && (
-                                                            <span style={{ fontSize: '11px', background: 'rgba(249, 115, 22, 0.1)', border: '1px solid rgba(249, 115, 22, 0.2)', color: '#ea580c', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Morning 🌅</span>
+                                                        {['1', 'morning', 'смена 1'].includes((task.template?.time_of_day || task.time_of_day || 'anytime').toLowerCase()) && (
+                                                            <span style={{ fontSize: '11px', background: 'rgba(249, 115, 22, 0.1)', border: '1px solid rgba(249, 115, 22, 0.2)', color: '#ea580c', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Shift 1</span>
                                                         )}
-                                                        {(task.template?.time_of_day || 'anytime').toLowerCase() === 'evening' && (
-                                                            <span style={{ fontSize: '11px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', color: '#4f46e5', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Evening 🌙</span>
+                                                        {['2', 'evening', 'смена 2'].includes((task.template?.time_of_day || task.time_of_day || 'anytime').toLowerCase()) && (
+                                                            <span style={{ fontSize: '11px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', color: '#4f46e5', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Shift 2</span>
                                                         )}
                                                         {isOverdue && <span style={{ fontSize: '11px', background: '#e11d48', color: 'white', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Overdue</span>}
                                                         {isDone && <span style={{ fontSize: '11px', background: '#16a34a', color: 'white', padding: '2px 8px', borderRadius: '12px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '4px' }}><CheckCircle2 size={12} /> Completed</span>}
@@ -638,7 +707,7 @@ export default function SupervisorDashboard() {
                                                     </div>
                                                 </div>
                                                 {isDone && task.photos && task.photos.length > 0 && (
-                                                    <img src={task.photos[0].url.startsWith('http') ? task.photos[0].url.replace('localhost:4000', '89.167.122.76:4000') : `http://89.167.122.76:4080${task.photos[0].url}`} alt="Thumb" style={{ width: "40px", height: "40px", borderRadius: "10px", objectFit: "cover", border: "1px solid #bbf7d0" }} />
+                                                    <img src={task.photos[0].url.startsWith('http') ? task.photos[0].url.replace('localhost:4000', 'api.trypranaextract.com') : `https://api.trypranaextract.com${task.photos[0].url}`} alt="Thumb" style={{ width: "40px", height: "40px", borderRadius: "10px", objectFit: "cover", border: "1px solid #bbf7d0" }} />
                                                 )}
                                             </div>
 
@@ -699,17 +768,17 @@ export default function SupervisorDashboard() {
                                     { id: "planned", label: "Planned", count: listPlanned.length },
                                     { id: "projects", label: "Projects", count: listProjects.length },
                                     { id: "overdue", label: "Overdue", count: listOverdue.length },
-                                    { id: "assigned", label: "My Assignments", count: listPersonal.length },
+                                    { id: "assigned", label: "Personal Tasks", count: listPersonal.length },
                                 ];
                                 if (listFailed.length > 0) tabs.push({ id: "failed", label: "Failed", count: listFailed.length });
 
                                 return (
                                     <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-                                        <div style={{ display: "flex", gap: "8px", background: "var(--card)", padding: "6px", borderRadius: "99px", border: "1px solid var(--border)", overflowX: "auto", position: "relative" }}>
+                                        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", background: "var(--card)", padding: "6px", borderRadius: "24px", border: "1px solid var(--border)", position: "relative" }}>
                                             {tabs.map(tab => (
                                                 <div
                                                     key={tab.id}
-                                                    style={{ flex: 1, position: "relative" }}
+                                                    style={{ flex: "1 1 auto", minWidth: "120px", position: "relative" }}
                                                 >
                                                     {activeSubTab === tab.id && (
                                                         <motion.div
@@ -718,7 +787,7 @@ export default function SupervisorDashboard() {
                                                                 position: "absolute",
                                                                 inset: 0,
                                                                 background: "var(--primary)",
-                                                                borderRadius: "99px",
+                                                                borderRadius: "18px",
                                                                 boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
                                                                 zIndex: 0
                                                             }}
@@ -784,7 +853,7 @@ export default function SupervisorDashboard() {
                                 {viewingTask.photos && viewingTask.photos.length > 0 && (
                                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                                         {viewingTask.photos.map(photo => {
-                                            const url = photo.url.startsWith('http') ? photo.url.replace('localhost:4000', '89.167.122.76:4000') : `http://89.167.122.76:4080${photo.url}`;
+                                            const url = photo.url.startsWith('http') ? photo.url.replace('localhost:4000', 'api.trypranaextract.com') : `https://api.trypranaextract.com${photo.url}`;
                                             return (
                                                 <img
                                                     key={photo.id}
@@ -822,7 +891,7 @@ export default function SupervisorDashboard() {
                                     <div style={{ marginTop: "8px", marginBottom: "8px", display: "flex", flexDirection: "column", gap: "12px" }}>
                                         <p style={{ margin: "0", fontSize: "16px", fontWeight: "600", color: "var(--foreground)" }}>Attached Proof:</p>
                                         {viewingTask.photos.map(photo => {
-                                            const url = photo.url.startsWith('http') ? photo.url.replace('localhost:4000', '89.167.122.76:4000') : `http://89.167.122.76:4080${photo.url}`;
+                                            const url = photo.url.startsWith('http') ? photo.url.replace('localhost:4000', 'api.trypranaextract.com') : `https://api.trypranaextract.com${photo.url}`;
                                             return (
                                                 <div key={photo.id} style={{ position: "relative" }}>
                                                     <img
@@ -864,6 +933,7 @@ export default function SupervisorDashboard() {
                                         <input
                                             type="file"
                                             accept="image/*"
+                                            capture="environment"
                                             onChange={(e) => handlePhotoUpload(e, viewingTask.id, viewingTask.zone_id)}
                                             style={{ display: "none" }}
                                             disabled={uploading === viewingTask.id}
@@ -902,7 +972,7 @@ export default function SupervisorDashboard() {
                                             <button
                                                 onClick={async () => {
                                                     const token = localStorage.getItem("access_token");
-                                                    await fetch(`http://89.167.122.76:4080/messages/${msg.id}/read`, { method: "PATCH", headers: { "Authorization": `Bearer ${token}` } });
+                                                    await fetch(`https://api.trypranaextract.com/messages/${msg.id}/read`, { method: "PATCH", headers: { "Authorization": `Bearer ${token}` } });
                                                     setMessages(messages.filter(m => m.id !== msg.id));
                                                 }}
                                                 style={{ background: "var(--primary)", color: "white", padding: "6px 12px", borderRadius: "8px", border: "none", fontSize: "12px", cursor: "pointer", fontWeight: "600" }}
@@ -974,7 +1044,7 @@ export default function SupervisorDashboard() {
                                 setStartingShift(true);
                                 try {
                                     const token = localStorage.getItem("access_token");
-                                    const res = await fetch("http://89.167.122.76:4080/auth/shift/start", {
+                                    const res = await fetch("https://api.trypranaextract.com/auth/shift/start", {
                                         method: "POST",
                                         headers: { "Authorization": `Bearer ${token}` }
                                     });

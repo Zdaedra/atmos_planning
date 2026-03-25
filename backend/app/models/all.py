@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Float
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
@@ -10,6 +10,7 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     plain_password = Column(String)
+    device_id = Column(String, nullable=True)
     role = Column(String, default="supervisor") # supervisor, garden supervisor, admin, system_admin
     is_active = Column(Boolean, default=True)
     center_id = Column(Integer, ForeignKey("centers.id"))
@@ -33,6 +34,9 @@ class Shift(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     center_id = Column(Integer, ForeignKey("centers.id"))
+    shift_number = Column(Integer, default=1)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
     start_time = Column(DateTime(timezone=True), server_default=func.now())
     end_time = Column(DateTime(timezone=True), nullable=True)
 
