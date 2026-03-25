@@ -874,7 +874,10 @@ def get_calendar(start_date: str, end_date: str, user_id: Optional[int] = None, 
                     "id": t.template.id if t.template else None,
                     "name": t.template.name if t.template else "Unknown",
                     "time_of_day": t.template.time_of_day if t.template else "anytime",
-                    "repeat_type": t.template.repeat_type if t.template else None
+                    "repeat_type": t.template.repeat_type if t.template else None,
+                    "zone_id": t.template.zone_id if t.template else 1,
+                    "description": t.template.description if t.template else "",
+                    "photo_required": t.template.photo_required if t.template else False
                 } if t.template else None
             })
             task_keys.add(f"{t.template_id}_{d_str}")
@@ -892,7 +895,10 @@ def get_calendar(start_date: str, end_date: str, user_id: Optional[int] = None, 
                 "id": tmpl.id,
                 "name": tmpl.name,
                 "time_of_day": tmpl.time_of_day,
-                "repeat_type": tmpl.repeat_type
+                "repeat_type": tmpl.repeat_type,
+                "zone_id": tmpl.zone_id,
+                "description": tmpl.description,
+                "photo_required": tmpl.photo_required
             }
         })
 
