@@ -217,42 +217,45 @@ def update_template(template_id: int, template_in: TaskTemplateCreate, db: Sessi
     db.commit()
     db.refresh(db_template)
     
-    # Instantly generate a Task mapping if the user assigns next_execution_date explicitly (Calendar UX sync)
-    if db_template.next_execution_date and db_template.next_execution_date != old_date:
-        target_dt = db_template.next_execution_date
-        start_of_day = datetime(target_dt.year, target_dt.month, target_dt.day, 0, 0, tzinfo=timezone.utc)
-        end_of_day = start_of_day + timedelta(days=1)
-        
-        existing = db.query(Task).filter(
-            Task.template_id == db_template.id,
-            Task.scheduled_date >= start_of_day,
-            Task.scheduled_date < end_of_day
-        ).first()
-        
-        if not existing:
-            new_task = Task(
-                template_id=db_template.id,
-                zone_id=db_template.zone_id,
-                assigned_user=db_template.default_assigned_user,
-                scheduled_date=db_template.next_execution_date,
-                status="Planned",
-                priority="normal"
-            )
-            db.add(new_task)
-            db.commit()
+    # UX Sync: If the scheduled date changed (either to a new date, or to None)
+    if db_template.next_execution_date != old_date:
+        # Since the schedule changed, remove any currently Planned/Overdue 
+        # instances so they don't get left behind on old dates.
+        if old_date:
+            tasks_to_delete = db.query(Task).filter(
+                Task.template_id == db_template.id,
+                Task.status.in_(["Planned", "Overdue"])
+            ).all()
+            ids_to_del = [t.id for t in tasks_to_delete]
+            if ids_to_del:
+                db.query(TaskComment).filter(TaskComment.task_id.in_(ids_to_del)).delete(synchronize_session=False)
+                db.query(TaskPhoto).filter(TaskPhoto.task_id.in_(ids_to_del)).delete(synchronize_session=False)
+                db.query(Task).filter(Task.id.in_(ids_to_del)).delete(synchronize_session=False)
+                db.commit()
+                
+        # If there's a new explicit date, instantiate the new mapping
+        if db_template.next_execution_date:
+            target_dt = db_template.next_execution_date
+            start_of_day = datetime(target_dt.year, target_dt.month, target_dt.day, 0, 0, tzinfo=timezone.utc)
+            end_of_day = start_of_day + timedelta(days=1)
             
-    elif old_date and db_template.next_execution_date is None:
-        # If the task was unassigned (next_execution_date cleared), delete planned/overdue instances
-        tasks_to_delete = db.query(Task).filter(
-            Task.template_id == db_template.id,
-            Task.status.in_(["Planned", "Overdue"])
-        ).all()
-        ids_to_del = [t.id for t in tasks_to_delete]
-        if ids_to_del:
-            db.query(TaskComment).filter(TaskComment.task_id.in_(ids_to_del)).delete(synchronize_session=False)
-            db.query(TaskPhoto).filter(TaskPhoto.task_id.in_(ids_to_del)).delete(synchronize_session=False)
-            db.query(Task).filter(Task.id.in_(ids_to_del)).delete(synchronize_session=False)
-            db.commit()
+            existing = db.query(Task).filter(
+                Task.template_id == db_template.id,
+                Task.scheduled_date >= start_of_day,
+                Task.scheduled_date < end_of_day
+            ).first()
+            
+            if not existing:
+                new_task = Task(
+                    template_id=db_template.id,
+                    zone_id=db_template.zone_id,
+                    assigned_user=db_template.default_assigned_user,
+                    scheduled_date=db_template.next_execution_date,
+                    status="Planned",
+                    priority="normal"
+                )
+                db.add(new_task)
+                db.commit()
             
     return db_template
 
