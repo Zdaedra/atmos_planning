@@ -8,9 +8,11 @@ import { Calendar } from "@/components/ui/calendar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
-import { fetchTasksForUser, fetchFailedTasks, fetchSupervisorShifts, markTaskComplete, revertTask } from "@/lib/api";
+import { fetchTasksForUser, fetchSupervisorShifts, markTaskComplete, revertTask, fetchDashboardData } from "@/lib/api";
 import { Checkbox } from "@/components/ui/checkbox";
 import { UserBadge } from "@/components/UserBadge";
+import { TaskPhotos, OverdueBadge } from "@/components/TaskRowExtras";
+import { DaySummaryDrill } from "@/components/DaySummaryDrill";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
@@ -113,11 +115,6 @@ export default function StaffStatsPage() {
         queryKey: ['allTasks', selectedUserId],
         queryFn: () => selectedUserId ? fetchTasksForUser(selectedUserId) : [],
         enabled: !!selectedUserId
-    });
-
-    const { data: failedTasks = [], isLoading: isLoadingFailed } = useQuery({
-        queryKey: ['failedTasks'],
-        queryFn: fetchFailedTasks
     });
 
     const { data: shiftHistory = [], isLoading: isLoadingShifts } = useQuery({
@@ -451,7 +448,7 @@ export default function StaffStatsPage() {
                                                     </div>
 
                                                     <div className="space-y-2.5">
-                                                        {['daily', 'planned', 'project', 'assigned'].map((type) => (
+                                                        {['daily', 'planned', 'project', 'mini', 'assigned'].map((type) => (
                                                             <div key={type} className="grid grid-cols-[52px_36px_36px_1fr_1fr] items-center gap-2 border-b border-muted/30 pb-2 last:border-0 last:pb-0 text-[11px]">
                                                                 <span className="font-semibold text-muted-foreground capitalize truncate">{type}</span>
                                                                 <span className="text-green-700 bg-green-50 px-1 py-0.5 rounded flex items-center justify-center whitespace-nowrap"><CheckCircle2 className="w-2.5 h-2.5 mr-0.5" />{user[type].completed}</span>
@@ -490,54 +487,6 @@ export default function StaffStatsPage() {
                                 </div>
                             </div>
                         </div>
-                    </div>
-
-                    {/* FAILED TASKS SECTION */}
-                    <div className="mt-12">
-                        <h2 className="text-2xl font-bold mb-6 flex items-center gap-2 text-destructive">
-                            <AlertTriangle className="h-6 w-6" />
-                            Failed Tasks Feed
-                        </h2>
-
-                        {isLoadingFailed ? (
-                            <div className="flex justify-center p-8"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div></div>
-                        ) : failedTasks.length === 0 ? (
-                            <Card className="bg-card">
-                                <CardContent className="flex flex-col items-center justify-center p-12 text-muted-foreground">
-                                    <CheckCircle2 className="h-12 w-12 mb-4 opacity-50 text-emerald-500" />
-                                    <p>No failed tasks found.</p>
-                                </CardContent>
-                            </Card>
-                        ) : (
-                            <div className="space-y-4">
-                                {failedTasks.map((task: any) => (
-                                    <Card key={task.id} className="border-l-4 border-l-destructive">
-                                        <CardContent className="p-4 flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-                                            <div>
-                                                <div className="flex items-center gap-2 mb-1">
-                                                    <Badge variant="outline" className="text-destructive border-destructive">
-                                                        {task.status === "Overdue" ? "Overdue" : "AI Rejected"}
-                                                    </Badge>
-                                                    {task.scheduled_date && (
-                                                        <span className="text-sm text-muted-foreground">
-                                                            {format(new Date(task.scheduled_date), "MMM d, yyyy")}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                <h3 className="font-semibold text-lg">{task.template?.name || "Unknown Task"}</h3>
-                                            </div>
-                                            <div className="flex flex-col items-end gap-2">
-                                                {task.assigned_user ? (
-                                                    <UserBadge userId={task.assigned_user} />
-                                                ) : (
-                                                    <Badge variant="secondary">Unassigned</Badge>
-                                                )}
-                                            </div>
-                                        </CardContent>
-                                    </Card>
-                                ))}
-                            </div>
-                        )}
                     </div>
 
                     {
@@ -646,6 +595,15 @@ export default function StaffStatsPage() {
 
                                 <TabsContent value="details" className="mt-0 outline-none">
                                     <div className="space-y-6 pt-4 w-full">
+                                        <div>
+                                            <h3 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground mb-2">
+                                                Summary for {format(personalDate, "EEE, MMM d")}
+                                            </h3>
+                                            <DaySummaryDrill
+                                                dateKey={format(personalDate, "yyyy-MM-dd")}
+                                                userId={selectedUserId!}
+                                            />
+                                        </div>
                                         <div className="flex items-center justify-between mb-2">
                                             <h3 className="font-semibold text-lg flex items-center gap-2"><CalendarIcon className="w-5 h-5 text-primary" /> Personal Calendar</h3>
                                         </div>
@@ -703,6 +661,8 @@ export default function StaffStatsPage() {
                                                                                 <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
                                                                                     {t.name || t.template?.name}
                                                                                 </span>
+                                                                                <OverdueBadge task={t} />
+                                                                                <TaskPhotos task={t} max={2} />
                                                                                 <Badge variant="secondary" className="text-[10px] capitalize">{t.tag}</Badge>
                                                                                 {t.is_projected && <Badge variant="outline" className="text-[10px] text-orange-500 border-orange-200">Projected</Badge>}
                                                                                 {(t.assigned_user || t.default_assigned_user) && <UserBadge userId={t.assigned_user || t.default_assigned_user} />}
@@ -734,6 +694,8 @@ export default function StaffStatsPage() {
                                                                                 <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
                                                                                     {t.name || t.template?.name}
                                                                                 </span>
+                                                                                <OverdueBadge task={t} />
+                                                                                <TaskPhotos task={t} max={2} />
                                                                                 <Badge variant="secondary" className="text-[10px] capitalize">{t.tag}</Badge>
                                                                                 {t.is_projected && <Badge variant="outline" className="text-[10px] text-orange-500 border-orange-200">Projected</Badge>}
                                                                                 {(t.assigned_user || t.default_assigned_user) && <UserBadge userId={t.assigned_user || t.default_assigned_user} />}
@@ -762,6 +724,8 @@ export default function StaffStatsPage() {
                                                                                     <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Shift 2</Badge>
                                                                                 ) : <span className="w-14" />}
                                                                                 <span className="text-sm font-medium flex-1 text-foreground">{t.name || t.template?.name}</span>
+                                                                                <OverdueBadge task={t} />
+                                                                                <TaskPhotos task={t} max={2} />
                                                                                 <Badge variant="secondary" className="text-[10px] capitalize">{t.tag}</Badge>
                                                                                 {(t.assigned_user || t.default_assigned_user) && <UserBadge userId={t.assigned_user || t.default_assigned_user} />}
                                                                             </div>
@@ -952,8 +916,8 @@ export default function StaffStatsPage() {
                                                     <AccordionItem key={shift.date} value={shift.date} className="border border-border/50 bg-card rounded-xl shadow-sm mb-4 px-4">
                                                         <AccordionTrigger className="hover:no-underline py-4">
                                                             {(() => {
-                                                                const tCompleted = shift.daily.completed + shift.planned.completed + shift.project.completed + shift.assigned.completed;
-                                                                const tFailed = shift.daily.failed + shift.planned.failed + shift.project.failed + shift.assigned.failed;
+                                                                const tCompleted = shift.daily.completed + shift.planned.completed + shift.project.completed + (shift.mini?.completed || 0) + shift.assigned.completed;
+                                                                const tFailed = shift.daily.failed + shift.planned.failed + shift.project.failed + (shift.mini?.failed || 0) + shift.assigned.failed;
                                                                 const tTasks = tCompleted + tFailed;
                                                                 const tPercent = tTasks > 0 ? Math.round((tFailed / tTasks) * 100) : 0;
                                                                 return (
@@ -987,7 +951,7 @@ export default function StaffStatsPage() {
                                                         </AccordionTrigger>
                                                         <AccordionContent className="pt-0 pb-4">
                                                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-                                                                {['daily', 'planned', 'project', 'assigned'].map((type) => (
+                                                                {['daily', 'planned', 'project', 'mini', 'assigned'].map((type) => (
                                                                     <div key={type} className="bg-muted/30 p-2 rounded-md border border-border/50">
                                                                         <span className="text-xs text-muted-foreground block text-center mb-1 capitalize">{type}</span>
                                                                         <div className="flex items-center justify-between">
@@ -1276,7 +1240,7 @@ export default function StaffStatsPage() {
                     <DialogHeader>
                         <DialogTitle>Учетные данные: {credentialsUser?.name}</DialogTitle>
                         <DialogDescription>
-                            Используются для входа в приложение.
+                            Email пользователя для входа. Пароль теперь не хранится в открытом виде — сбросьте его, если нужно сообщить заново.
                         </DialogDescription>
                     </DialogHeader>
                     <div className="grid gap-4 py-4">
@@ -1289,15 +1253,33 @@ export default function StaffStatsPage() {
                                 className="bg-muted/50 font-mono text-sm h-10 border-muted"
                             />
                         </div>
-                        <div className="flex flex-col gap-2">
-                            <Label htmlFor="password" className="font-semibold text-muted-foreground">Пароль</Label>
-                            <Input
-                                id="password"
-                                value={credentialsUser?.plain_password || "Не сохранен / Скрыт"}
-                                readOnly
-                                className="bg-muted/50 font-mono text-sm h-10 border-muted"
-                            />
-                        </div>
+                        {credentialsUser?.id && (
+                            <Button
+                                variant="outline"
+                                onClick={async () => {
+                                    if (!credentialsUser?.id) return;
+                                    if (!confirm("Сгенерировать новый пароль для пользователя? Старый перестанет работать.")) return;
+                                    try {
+                                        const token = localStorage.getItem("access_token");
+                                        const res = await fetch(`https://api.trypranaextract.com/supervisors/${credentialsUser.id}/reset-password`, {
+                                            method: "POST",
+                                            headers: { "Authorization": `Bearer ${token}` },
+                                        });
+                                        if (!res.ok) {
+                                            alert("Не удалось сбросить пароль");
+                                            return;
+                                        }
+                                        const data = await res.json();
+                                        prompt("Новый пароль (скопируйте, он больше не будет показан):", data.new_password);
+                                    } catch (e) {
+                                        console.error(e);
+                                        alert("Ошибка при сбросе пароля");
+                                    }
+                                }}
+                            >
+                                Сбросить пароль
+                            </Button>
+                        )}
                     </div>
                 </DialogContent>
             </Dialog>

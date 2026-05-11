@@ -1,5 +1,6 @@
 import { Navigate, Outlet } from "react-router-dom";
 import { AppSidebar } from "./AppSidebar";
+import { DepartmentSwitcher } from "./DepartmentSwitcher";
 import { getAuthToken, fetchMe, startShift } from "@/lib/api";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { isToday } from "date-fns";
@@ -40,6 +41,7 @@ export function AppLayout() {
     <div className="min-h-screen bg-background">
       <AppSidebar />
       <main className="ml-0 md:ml-[260px] min-h-screen">
+        <DepartmentSwitcher />
         <Outlet />
       </main>
 

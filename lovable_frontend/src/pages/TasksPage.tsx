@@ -32,6 +32,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import TaskFormModal from "@/components/TaskFormModal";
 import { UserBadge } from "@/components/UserBadge";
+import { useDepartment } from "@/lib/department";
 
 import {
   Accordion,
@@ -53,6 +54,8 @@ function categoryColor(cat: string) {
 export default function TasksPage() {
   const [search, setSearch] = useState("");
   const queryClient = useQueryClient();
+  const { department } = useDepartment();
+  const isService = department === "service";
 
   const { data: templates = [], isLoading } = useQuery({
     queryKey: ['taskTemplates'],
@@ -67,9 +70,11 @@ export default function TasksPage() {
   const weeklyTasks = filtered.filter((t: any) => t.repeat_type?.toLowerCase() === 'weekly');
   const biWeeklyTasks = filtered.filter((t: any) => t.repeat_type?.toLowerCase() === 'biweekly' || t.repeat_type?.toLowerCase() === 'bi-weekly');
   const monthlyTasks = filtered.filter((t: any) => t.repeat_type?.toLowerCase() === 'monthly');
+  const customTasks = filtered.filter((t: any) => t.repeat_type?.toLowerCase() === 'custom');
+  const miniTasks = filtered.filter((t: any) => t.repeat_type?.toLowerCase() === 'mini');
   const projectTasks = filtered.filter((t: any) => t.repeat_type?.toLowerCase() === 'project');
 
-  const assignedTypes = ['daily', 'weekly', 'biweekly', 'bi-weekly', 'monthly', 'project'];
+  const assignedTypes = ['daily', 'weekly', 'biweekly', 'bi-weekly', 'monthly', 'custom', 'mini', 'project'];
   const notAssignedTasks = filtered.filter((t: any) => !t.repeat_type || !assignedTypes.includes(t.repeat_type.toLowerCase()));
 
   const handleClearDate = async (taskId: number) => {
@@ -124,7 +129,10 @@ export default function TasksPage() {
                 ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || 'anytime').toLowerCase()) ? (
                   <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20">Shift 2</Badge>
                 ) : (
-                  <Badge variant="secondary" className="text-muted-foreground bg-muted/30">Anytime</Badge>
+                  <Badge variant="secondary" className="text-muted-foreground bg-muted/30">Both shifts</Badge>
+                )}
+                {t.repeat_type?.toLowerCase() === 'custom' && t.repeat_interval_days && (
+                  <Badge variant="outline" className="ml-2 text-[10px]">every {t.repeat_interval_days}d</Badge>
                 )}
               </TableCell>
               <TableCell>
@@ -163,7 +171,7 @@ export default function TasksPage() {
         <h1 className="text-2xl font-semibold text-foreground">Tasks</h1>
         <div className="flex gap-3 items-center">
           <Button variant="destructive" size="sm" onClick={async () => {
-            if (window.confirm("Удалить все назначения (исполнителей и даты) для ВСЕХ будущих задач? Это действие нельзя отменить.")) {
+            if (window.confirm("Clear all assignments (assignees and dates) for ALL upcoming tasks? This cannot be undone.")) {
               const token = localStorage.getItem('access_token');
               try {
                 await fetch(`https://api.trypranaextract.com/tasks/templates/unassign-all-global`, {
@@ -172,13 +180,13 @@ export default function TasksPage() {
                 });
                 queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
                 queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
-                alert("Все будущие назначения успешно очищены!");
+                alert("All upcoming assignments cleared.");
               } catch (e) {
                 console.error("Failed to unassign all", e);
               }
             }
           }}>
-            Сбросить все назначения
+            Clear all assignments
           </Button>
           <Button variant="outline">
             <Upload className="w-4 h-4 mr-2" />
@@ -210,14 +218,16 @@ export default function TasksPage() {
           <div className="text-center py-8">Loading templates...</div>
         ) : (
           <Accordion type="multiple" className="w-full space-y-4">
-            <AccordionItem value="daily" className="border-b-0">
-              <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-lg border">
-                Daily ({dailyTasks.length})
-              </AccordionTrigger>
-              <AccordionContent className="border border-t-0 rounded-b-md p-0 overflow-visible">
-                {renderTable(dailyTasks)}
-              </AccordionContent>
-            </AccordionItem>
+            {!isService && (
+              <AccordionItem value="daily" className="border-b-0">
+                <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-lg border">
+                  Daily ({dailyTasks.length})
+                </AccordionTrigger>
+                <AccordionContent className="border border-t-0 rounded-b-md p-0 overflow-visible">
+                  {renderTable(dailyTasks)}
+                </AccordionContent>
+              </AccordionItem>
+            )}
 
             <AccordionItem value="weekly" className="border-b-0">
               <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-lg border">
@@ -243,6 +253,24 @@ export default function TasksPage() {
               </AccordionTrigger>
               <AccordionContent className="border border-t-0 rounded-b-md p-0 overflow-visible">
                 {renderTable(monthlyTasks)}
+              </AccordionContent>
+            </AccordionItem>
+
+            <AccordionItem value="custom" className="border-b-0">
+              <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-lg border">
+                Custom ({customTasks.length})
+              </AccordionTrigger>
+              <AccordionContent className="border border-t-0 rounded-b-md p-0 overflow-visible">
+                {renderTable(customTasks)}
+              </AccordionContent>
+            </AccordionItem>
+
+            <AccordionItem value="mini" className="border-b-0">
+              <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-lg border">
+                Mini Tasks ({miniTasks.length})
+              </AccordionTrigger>
+              <AccordionContent className="border border-t-0 rounded-b-md p-0 overflow-visible">
+                {renderTable(miniTasks)}
               </AccordionContent>
             </AccordionItem>
 

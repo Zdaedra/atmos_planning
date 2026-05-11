@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Play, CheckCircle2, Bell, User, Clock, MapPin, Camera, CheckSquare, ChevronRight, MessageSquare, X, Calendar, LogIn, Briefcase } from "lucide-react";
 import ReactCalendar from 'react-calendar';
@@ -74,22 +74,22 @@ export default function SupervisorDashboard() {
                 const userData = await userRes.json();
 
                 setLoadingStep(`Fetching /tasks/user/${userData.id}...`);
-                const tasksRes = await fetch(`https://api.trypranaextract.com/tasks/user/${userData.id}`);
+                const tasksRes = await fetch(`https://api.trypranaextract.com/tasks/user/${userData.id}`, { cache: "no-store" });
                 const tasksData = tasksRes.ok ? await tasksRes.json() : [];
 
                 setLoadingStep("Fetching /tasks/templates/...");
-                const defaultTemplatesRes = await fetch(`https://api.trypranaextract.com/tasks/templates/`);
+                const defaultTemplatesRes = await fetch(`https://api.trypranaextract.com/tasks/templates/`, { cache: "no-store" });
                 const templatesDataRaw = defaultTemplatesRes.ok ? await defaultTemplatesRes.json() : [];
                 const templatesData = templatesDataRaw.filter((t: any) => t.default_assigned_user === userData.id || t.default_assigned_user === null);
 
                 setLoadingStep("Fetching /messages/user...");
-                const msgsRes = await fetch(`https://api.trypranaextract.com/messages/user/${userData.id}?unread_only=true`);
+                const msgsRes = await fetch(`https://api.trypranaextract.com/messages/user/${userData.id}?unread_only=true&_cb=${Date.now()}`, { cache: "no-store" });
                 const msgsData = msgsRes.ok ? await msgsRes.json() : [];
 
                 setLoadingStep("Fetching /tasks/calendar...");
                 const startD = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toISOString().split('T')[0];
                 const endD = new Date(new Date().getFullYear(), new Date().getMonth() + 2, 0).toISOString().split('T')[0];
-                const calRes = await fetch(`https://api.trypranaextract.com/tasks/calendar?start_date=${startD}&end_date=${endD}&user_id=${userData.id}`);
+                const calRes = await fetch(`https://api.trypranaextract.com/tasks/calendar?start_date=${startD}&end_date=${endD}&user_id=${userData.id}&_cb=${Date.now()}`, { cache: "no-store" });
                 const calMapData = calRes.ok ? await calRes.json() : {};
 
                 setLoadingStep("Fetching active shifts...");
@@ -172,6 +172,14 @@ export default function SupervisorDashboard() {
                 setStartingShift(false);
             }
         };
+
+        const isAzad = (user.name && user.name.toLowerCase().includes("azad")) ||
+            (user.username && user.username.toLowerCase().includes("azad"));
+
+        if (isAzad) {
+            await callApi(null, null);
+            return;
+        }
 
         if (!navigator.geolocation) {
             setLocError("Geolocation is not supported by your browser.");
@@ -364,33 +372,70 @@ export default function SupervisorDashboard() {
         );
     }
 
-    // Safe local date formatter to prevent timezone shifts
-    const formatLocalDate = (d: Date) => {
-        const year = d.getFullYear();
-        const month = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        return `${year}-${month}-${day}`;
+    // Enforce proper timezone alignment with the Atmos backend (Bali)
+    const getBaliDateString = (d: Date | string) => {
+        if (!d) return "";
+        let dateObj = typeof d === 'string' ? new Date(d) : d;
+
+        // Fix for iOS/Safari missing 'Z' suffix issue occasionally passing naive dates:
+        if (typeof d === 'string' && d.length <= 10) {
+            // If it's strictly a Date string like "2026-04-12", keep it
+            return d;
+        }
+
+        if (isNaN(dateObj.getTime())) {
+            return typeof d === 'string' ? d.split('T')[0] : "";
+        }
+
+        const formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Asia/Makassar',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        });
+
+        const parts = formatter.formatToParts(dateObj);
+        const year = parts.find(p => p.type === 'year')?.value;
+        const month = parts.find(p => p.type === 'month')?.value;
+        const day = parts.find(p => p.type === 'day')?.value;
+
+        if (year && month && day) {
+            return `${year}-${month}-${day}`;
+        }
+        return dateObj.toISOString().split('T')[0];
     };
+
+    const formatLocalDate = (d: Date) => getBaliDateString(d);
 
     const isTaskOverdue = (t: any) => {
         if (t.template?.repeat_type?.toLowerCase() === 'daily') return false;
         if (t.status === "Overdue") return true;
         if (!["Pending", "Planned", "In Progress"].includes(t.status) || !t.scheduled_date) return false;
 
-        const taskDateStr = typeof t.scheduled_date === 'string' ? t.scheduled_date.split('T')[0] : t.scheduled_date;
-        const currentZoneDate = new Date();
-        const todayLocalStr = `${currentZoneDate.getFullYear()}-${String(currentZoneDate.getMonth() + 1).padStart(2, '0')}-${String(currentZoneDate.getDate()).padStart(2, '0')}`;
+        const taskDateStr = getBaliDateString(t.scheduled_date);
+        const todayLocalStr = getBaliDateString(new Date());
 
         return taskDateStr < todayLocalStr;
     };
 
-    const todayStr = formatLocalDate(new Date());
-    const isToday = (t: any) => t.scheduled_date && t.scheduled_date.startsWith(todayStr);
+    const todayStr = getBaliDateString(new Date());
+    const isToday = (t: any) => t.scheduled_date && getBaliDateString(t.scheduled_date) === todayStr;
 
     const isTodayOrPast = (t: any) => {
         if (!t.scheduled_date) return false;
-        const taskDateStr = typeof t.scheduled_date === 'string' ? t.scheduled_date.split('T')[0] : t.scheduled_date;
+        const taskDateStr = getBaliDateString(t.scheduled_date);
         return taskDateStr <= todayStr;
+    };
+
+    // Service tasks with supply require attention several days BEFORE the task date.
+    const isInSupplyWindow = (t: any) => {
+        if ((t.template?.department || "").toLowerCase() !== "service") return false;
+        const days = t.template?.supply_days_before;
+        const supply = t.template?.supply;
+        if (!days || !supply || !t.scheduled_date) return false;
+        const sched = new Date(t.scheduled_date).getTime();
+        const now = Date.now();
+        return now >= sched - Number(days) * 86400000 && now < sched;
     };
 
     const overdueTasks = tasks.filter(isTaskOverdue);
@@ -405,8 +450,8 @@ export default function SupervisorDashboard() {
 
     const completedTasks = sortTasksByTime(tasks.filter(t => t.status === "Completed"));
     const dailyTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && isToday(t) && t.template?.repeat_type?.toLowerCase() === 'daily'));
-    const plannedTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && !isTaskOverdue(t) && isTodayOrPast(t) && t.template?.repeat_type?.toLowerCase() !== 'daily' && t.template?.repeat_type?.toLowerCase() !== 'project'));
-    const projectTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && !isTaskOverdue(t) && isTodayOrPast(t) && t.template?.repeat_type?.toLowerCase() === 'project'));
+    const plannedTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && !isTaskOverdue(t) && (isTodayOrPast(t) || isInSupplyWindow(t)) && t.template?.repeat_type?.toLowerCase() !== 'daily' && t.template?.repeat_type?.toLowerCase() !== 'project'));
+    const projectTasks = sortTasksByTime(tasks.filter(t => t.status !== "Completed" && !isTaskOverdue(t) && (isTodayOrPast(t) || isInSupplyWindow(t)) && t.template?.repeat_type?.toLowerCase() === 'project'));
 
     const getTaskCountForDate = (date: Date) => {
         const dateStr = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().split('T')[0];
@@ -453,6 +498,10 @@ export default function SupervisorDashboard() {
                                     Shift 2
                                 </button>
                             </div>
+                            <button onClick={() => handleStartShift(3)} disabled={startingShift} style={{ width: "100%", background: "rgba(16, 185, 129, 0.1)", color: "#059669", border: "1px solid rgba(16, 185, 129, 0.2)", padding: "16px", borderRadius: "16px", fontSize: "16px", fontWeight: "600", cursor: "pointer", display: "flex", justifyContent: "center", alignItems: "center", gap: "8px", transition: "all 0.2s" }}>
+                                {startingShift ? <div className="loading-spinner" style={{ width: "20px", height: "20px", borderWidth: "2px", borderColor: "#059669 #059669 transparent transparent" }} /> : <Play size={20} />}
+                                Full Day (обе смены)
+                            </button>
 
                             {locError && locError.includes("Location access denied") && (
                                 <button onClick={async () => {
@@ -580,26 +629,68 @@ export default function SupervisorDashboard() {
                                                     {label} <span style={{ background: "#e2e8f0", padding: "2px 8px", borderRadius: "12px", fontSize: "14px", fontWeight: "600" }}>{tasksArray.length}</span>
                                                 </summary>
                                                 <div style={{ display: "flex", flexDirection: "column", gap: "12px", paddingLeft: "4px" }}>
-                                                    {tasksArray.map((t, idx) => (
-                                                        <div key={`sim-${label}-${idx}`} style={{ background: "var(--card)", padding: "16px", borderRadius: "20px", boxShadow: "0 4px 12px rgba(0,0,0,0.04)", border: "1px solid var(--border)" }}>
-                                                            <h4 style={{ margin: "0", fontSize: "17px", fontWeight: "600" }}>{t.template?.name || t.name || `Task #${t.id}`}</h4>
-                                                            <div style={{ display: 'flex', gap: '8px', marginTop: "8px", flexWrap: "wrap", alignItems: "center" }}>
-                                                                {['1', 'morning', 'смена 1'].includes((t.template?.time_of_day || t.time_of_day || 'anytime').toLowerCase()) && (
-                                                                    <span style={{ fontSize: '11px', background: 'rgba(249, 115, 22, 0.1)', border: '1px solid rgba(249, 115, 22, 0.2)', color: '#ea580c', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Shift 1</span>
+                                                    {tasksArray.map((t, idx) => {
+                                                        const isService = (t.template?.department || "").toLowerCase() === "service";
+                                                        const isSupply = !!t.is_supply;
+                                                        // Supply rows can be a JSON string OR an already-parsed array.
+                                                        let supplyItems: Array<{ name?: string; qty?: string }> = [];
+                                                        const rawSupply = t.template?.supply;
+                                                        if (Array.isArray(rawSupply)) {
+                                                            supplyItems = rawSupply;
+                                                        } else if (typeof rawSupply === "string" && rawSupply.trim()) {
+                                                            try {
+                                                                const parsed = JSON.parse(rawSupply);
+                                                                supplyItems = Array.isArray(parsed) ? parsed : [{ name: rawSupply }];
+                                                            } catch {
+                                                                supplyItems = [{ name: rawSupply }];
+                                                            }
+                                                        }
+                                                        const baseName = t.template?.name || t.name || `Task #${t.id}`;
+                                                        const cardName = isSupply ? `Supply: ${baseName}` : baseName;
+                                                        return (
+                                                            <div key={`sim-${label}-${idx}`} style={{ background: "var(--card)", padding: "16px", borderRadius: "20px", boxShadow: "0 4px 12px rgba(0,0,0,0.04)", border: isSupply ? "2px solid rgba(245, 158, 11, 0.45)" : "1px solid var(--border)" }}>
+                                                                <h4 style={{ margin: "0", fontSize: "17px", fontWeight: "600" }}>{cardName}</h4>
+                                                                <div style={{ display: 'flex', gap: '8px', marginTop: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                                                                    {!isSupply && ['1', 'morning', 'смена 1'].includes((t.template?.time_of_day || t.time_of_day || 'anytime').toLowerCase()) && (
+                                                                        <span style={{ fontSize: '11px', background: 'rgba(249, 115, 22, 0.1)', border: '1px solid rgba(249, 115, 22, 0.2)', color: '#ea580c', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Shift 1</span>
+                                                                    )}
+                                                                    {!isSupply && ['2', 'evening', 'смена 2'].includes((t.template?.time_of_day || t.time_of_day || 'anytime').toLowerCase()) && (
+                                                                        <span style={{ fontSize: '11px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', color: '#4f46e5', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Shift 2</span>
+                                                                    )}
+                                                                    {isSupply ? (
+                                                                        <span style={{ fontSize: '11px', background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.35)', color: '#b45309', padding: '2px 8px', borderRadius: '12px', fontWeight: '700' }}>Supply</span>
+                                                                    ) : (
+                                                                        <span style={{ fontSize: '11px', background: '#f8fafc', border: `1px solid #e2e8f0`, color: '#475569', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>
+                                                                            {(t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'daily' ? 'Daily' :
+                                                                                (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'weekly' ? 'Weekly' :
+                                                                                    (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'biweekly' ? 'Bi-weekly' :
+                                                                                        (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'monthly' ? 'Monthly' :
+                                                                                            (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'mini' ? 'Mini' :
+                                                                                                (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'project' ? 'Project' : 'One-time'}
+                                                                        </span>
+                                                                    )}
+                                                                    {isService && (
+                                                                        <span style={{ fontSize: '11px', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.25)', color: '#059669', padding: '2px 8px', borderRadius: '12px', fontWeight: '700' }}>Service</span>
+                                                                    )}
+                                                                </div>
+                                                                {isSupply && supplyItems.length > 0 && (
+                                                                    <div style={{ marginTop: "10px", padding: "10px 12px", background: "rgba(245, 158, 11, 0.07)", border: "1px solid rgba(245, 158, 11, 0.20)", borderRadius: "12px", fontSize: "13px" }}>
+                                                                        <div style={{ fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, color: "#b45309", marginBottom: "6px" }}>
+                                                                            Что закупить / пересчитать
+                                                                        </div>
+                                                                        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 12px" }}>
+                                                                            {supplyItems.map((it, j) => (
+                                                                                <React.Fragment key={j}>
+                                                                                    <div style={{ color: "#1e293b" }}>{it.name}</div>
+                                                                                    <div style={{ color: "#475569", fontSize: "12px" }}>{it.qty || ""}</div>
+                                                                                </React.Fragment>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
                                                                 )}
-                                                                {['2', 'evening', 'смена 2'].includes((t.template?.time_of_day || t.time_of_day || 'anytime').toLowerCase()) && (
-                                                                    <span style={{ fontSize: '11px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', color: '#4f46e5', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>Shift 2</span>
-                                                                )}
-                                                                <span style={{ fontSize: '11px', background: '#f8fafc', border: `1px solid #e2e8f0`, color: '#475569', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>
-                                                                    {(t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'daily' ? 'Daily' :
-                                                                        (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'weekly' ? 'Weekly' :
-                                                                            (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'biweekly' ? 'Bi-weekly' :
-                                                                                (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'monthly' ? 'Monthly' :
-                                                                                    (t.template?.repeat_type || t.repeat_type || "").toLowerCase() === 'project' ? 'Project' : 'One-time'}
-                                                                </span>
                                                             </div>
-                                                        </div>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </div>
                                             </details>
                                         );

@@ -1,18 +1,26 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+from datetime import timedelta
 import uuid
 import os
 import io
 from PIL import Image, ImageOps
 
 from app.core.database import get_db
+from app.core.security import get_current_user, require_admin, require_internal
 from app.core.storage import get_minio_client, MINIO_BUCKET
+from app.core.time_utils import get_now
 from app.models.all import TaskPhoto, Task, User, Zone
 
 router = APIRouter()
 
+PHOTO_RETENTION_DAYS = int(os.getenv("PHOTO_RETENTION_DAYS", "14"))
+
 @router.get("/reports")
-def get_recent_reports(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
+def get_recent_reports(skip: int = 0, limit: int = 50,
+                       _user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
     photos = db.query(TaskPhoto)\
         .order_by(TaskPhoto.created_at.desc())\
         .offset(skip).limit(limit).all()
@@ -35,7 +43,9 @@ def get_recent_reports(skip: int = 0, limit: int = 50, db: Session = Depends(get
     return result
 
 @router.post("/upload", response_model=dict)
-def upload_photo(task_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_photo(task_id: int, file: UploadFile = File(...),
+                 current_user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
     db_task = db.query(Task).filter(Task.id == task_id).first()
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -82,7 +92,7 @@ def upload_photo(task_id: int, file: UploadFile = File(...), db: Session = Depen
         db_photo = TaskPhoto(
             task_id=task_id,
             url=file_url,
-            # uploaded_by=user_id # Removed for simplicity in this MVP endpoint without full auth injection
+            uploaded_by=current_user.id,
         )
         db.add(db_photo)
         db.commit()
@@ -94,7 +104,9 @@ def upload_photo(task_id: int, file: UploadFile = File(...), db: Session = Depen
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/upload/{photo_id}")
-def delete_photo(photo_id: int, db: Session = Depends(get_db)):
+def delete_photo(photo_id: int,
+                 _admin: User = Depends(require_admin),
+                 db: Session = Depends(get_db)):
     db_photo = db.query(TaskPhoto).filter(TaskPhoto.id == photo_id).first()
     if not db_photo:
         raise HTTPException(status_code=404, detail="Photo not found")
@@ -111,3 +123,37 @@ def delete_photo(photo_id: int, db: Session = Depends(get_db)):
     db.delete(db_photo)
     db.commit()
     return {"message": "Photo deleted"}
+
+
+@router.post("/cleanup-old")
+def cleanup_old_photos(_: bool = Depends(require_internal),
+                       db: Session = Depends(get_db)):
+    """
+    Delete TaskPhoto rows whose `created_at` is older than PHOTO_RETENTION_DAYS,
+    along with the underlying objects in MinIO. Internal-only (X-Internal-Token).
+    """
+    cutoff = get_now() - timedelta(days=PHOTO_RETENTION_DAYS)
+    old_photos = db.query(TaskPhoto).filter(TaskPhoto.created_at < cutoff).all()
+
+    client = get_minio_client()
+    deleted = 0
+    failed_minio = 0
+
+    for p in old_photos:
+        try:
+            filename = (p.url or "").rsplit("/", 1)[-1]
+            if filename:
+                client.remove_object(MINIO_BUCKET, filename)
+        except Exception as e:
+            failed_minio += 1
+            print(f"cleanup-old: failed to remove {p.url} from MinIO: {e}")
+        db.delete(p)
+        deleted += 1
+
+    db.commit()
+    return {
+        "deleted_rows": deleted,
+        "failed_minio_removals": failed_minio,
+        "cutoff": cutoff.isoformat(),
+        "retention_days": PHOTO_RETENTION_DAYS,
+    }

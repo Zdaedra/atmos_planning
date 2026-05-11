@@ -1,0 +1,19 @@
+admin.trypranaextract.com {
+    reverse_proxy frontend:80
+}
+
+app.trypranaextract.com {
+    reverse_proxy supervisor_frontend:3000
+}
+
+api.trypranaextract.com {
+    # Custom handler for MinIO to serve media dynamically!
+    handle /atmos-photos/* {
+        reverse_proxy minio:9000
+    }
+    
+    # Everything else goes to FastAPI backend!
+    handle {
+        reverse_proxy backend:8000
+    }
+}

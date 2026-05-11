@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Plus, Clock, Pencil, CheckCircle2, CalendarCheck, XCircle } from "lucide-react";
 import TaskFormModal from "@/components/TaskFormModal";
 import { UserBadge } from "@/components/UserBadge";
+import { TaskPhotos, OverdueBadge } from "@/components/TaskRowExtras";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -79,7 +80,12 @@ export default function CalendarPage() {
         tag: t.repeat_type || "unknown",
         status: t.status,
         is_real: !t.is_projected,
-        is_projected: t.is_projected
+        is_projected: t.is_projected,
+        is_supply: !!t.is_supply,
+        supply: t.template?.supply,
+        supply_days_before: t.template?.supply_days_before,
+        department: t.template?.department,
+        next_execution_date: t.template?.next_execution_date,
       }));
     });
     return mapped;
@@ -97,9 +103,19 @@ export default function CalendarPage() {
     });
   };
 
-  const plannedTasks = sortTasksByTime(assignedTasks.filter(t => (t.repeat_type || "").toLowerCase() !== 'project' && (t.repeat_type || "").toLowerCase() !== 'daily'));
-  const projectTasks = sortTasksByTime(assignedTasks.filter(t => (t.repeat_type || "").toLowerCase() === 'project'));
+  const supplyTasks = sortTasksByTime(assignedTasks.filter(t => t.is_supply));
+  const plannedTasks = sortTasksByTime(assignedTasks.filter(t => {
+    if (t.is_supply) return false;
+    const rt = (t.repeat_type || "").toLowerCase();
+    return rt !== 'project' && rt !== 'daily' && rt !== 'mini';
+  }));
+  const miniTasks = sortTasksByTime(assignedTasks.filter(t => !t.is_supply && (t.repeat_type || "").toLowerCase() === 'mini'));
+  const projectTasks = sortTasksByTime(assignedTasks.filter(t => !t.is_supply && (t.repeat_type || "").toLowerCase() === 'project' && t.status !== 'Completed'));
   // Daily Tasks omitted from Calendar view per user requirements
+
+  const completedProjects = useMemo(() => {
+    return allTasks.filter((t: any) => t.status?.toLowerCase() === 'completed' && (t.repeat_type || t.template?.repeat_type || "").toLowerCase() === 'project');
+  }, [allTasks]);
 
   const repeatOrder: Record<string, number> = {
     weekly: 1,
@@ -135,14 +151,21 @@ export default function CalendarPage() {
     }));
 
   const taskCounts: Record<string, number> = {};
+  const highlightedDays: Date[] = [];
+
   Object.keys(calendarTasks).forEach(key => {
-    const nonDailyTasks = calendarTasks[key].filter(t => (t.repeat_type || "").toLowerCase() !== 'daily');
+    // Filter out completed projects
+    const visibleTasks = calendarTasks[key].filter(t => !(t.status === 'Completed' && (t.repeat_type || "").toLowerCase() === 'project'));
+
+    if (visibleTasks.length > 0) {
+      highlightedDays.push(parseISO(key));
+    }
+
+    const nonDailyTasks = visibleTasks.filter(t => (t.repeat_type || "").toLowerCase() !== 'daily');
     if (nonDailyTasks.length > 0) {
       taskCounts[key] = nonDailyTasks.length;
     }
   });
-
-  const highlightedDays = Object.keys(calendarTasks).map((d) => parseISO(d));
 
   return (
     <div className="p-6 space-y-6">
@@ -192,63 +215,139 @@ export default function CalendarPage() {
                   ) : (
                     <div className="divide-y divide-border">
                       {plannedTasks.map((t, i) => (
-                        <div key={i} className={`flex items-center gap-3 p-3 group ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
-                          {['1', 'morning', 'смена 1'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
-                            <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Shift 1</Badge>
-                          ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
-                            <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Shift 2</Badge>
-                          ) : <span className="w-14" />}
-                          {t.status === 'Completed' && (
-                            <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
-                          )}
-                          <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
-                            {t.name}
-                          </span>
-                          <UserBadge userId={t.assigned_user || t.default_assigned_user} />
-                          <Badge variant="secondary" className="text-xs capitalize">{t.tag}</Badge>
+                        <TaskFormModal
+                          key={i}
+                          task={t}
+                          trigger={
+                            <div role="button" tabIndex={0} className={`flex items-center gap-3 p-3 group cursor-pointer hover:bg-muted/30 ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
+                              {['1', 'morning', 'смена 1'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                                <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Shift 1</Badge>
+                              ) : ['2', 'evening', 'смена 2'].includes((t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase()) ? (
+                                <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Shift 2</Badge>
+                              ) : <span className="w-14" />}
+                              {t.status === 'Completed' && (
+                                <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
+                              )}
+                              <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
+                                {t.name}
+                              </span>
+                              <OverdueBadge task={t} />
+                              <TaskPhotos task={t} />
+                              <UserBadge userId={t.assigned_user || t.default_assigned_user} />
+                              <Badge variant="secondary" className="text-xs capitalize">{t.tag}</Badge>
+                              <Pencil className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const token = localStorage.getItem('access_token');
+                                  fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                                    method: "PUT",
+                                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+                                    body: JSON.stringify({
+                                      name: t.name,
+                                      description: t.description || "",
+                                      repeat_type: t.repeat_type,
+                                      time_of_day: t.time_of_day || "anytime",
+                                      zone_id: t.zone_id,
+                                      photo_required: t.photo_required,
+                                      next_execution_date: null
+                                    })
+                                  }).then(res => {
+                                    if (res.ok) {
+                                      queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                                      queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
+                                    } else {
+                                      alert("Failed to unassign task");
+                                    }
+                                  }).catch(err => {
+                                    console.error(err);
+                                    alert("Failed to unassign task");
+                                  });
+                                }}
+                                title="Remove from schedule"
+                              >
+                                Unassign
+                              </Button>
+                            </div>
+                          }
+                        />
+                      ))}
+                    </div>
+                  )}
+                </AccordionContent>
+              </AccordionItem>
+
+              {/* Supply Tasks (Service prep) */}
+              {supplyTasks.length > 0 && (
+                <AccordionItem value="supply" className="border-b-0 mt-4">
+                  <AccordionTrigger className="bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700 px-4 rounded-t-md hover:no-underline font-semibold text-lg border">
+                    Supply Tasks ({supplyTasks.length})
+                  </AccordionTrigger>
+                  <AccordionContent className="border border-t-0 rounded-b-md p-0 overflow-visible">
+                    <div className="divide-y divide-border">
+                      {supplyTasks.map((t, i) => {
+                        const targetIso = t.next_execution_date;
+                        const targetLabel = targetIso ? format(new Date(targetIso), "d MMM") : "";
+                        const itemsCount = Array.isArray(t.supply) ? t.supply.length : 0;
+                        return (
                           <TaskFormModal
+                            key={i}
                             task={t}
                             trigger={
-                              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity" title="Edit Task">
-                                <Pencil className="w-4 h-4" />
-                              </Button>
+                              <button type="button" className={`w-full flex items-center gap-3 p-3 text-left hover:bg-muted/30 ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
+                                <Badge variant="outline" className="bg-amber-100 text-amber-800 border-amber-300 text-[10px] w-14 justify-center">Supply</Badge>
+                                {t.status === 'Completed' && <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />}
+                                <div className="flex-1 min-w-0">
+                                  <div className={`text-sm font-medium ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
+                                    Supply: {t.name}
+                                  </div>
+                                  <div className="text-[11px] text-muted-foreground">
+                                    {targetLabel ? `→ задача ${targetLabel}` : "→ для основной задачи"}
+                                    {itemsCount > 0 && ` · ${itemsCount} ${itemsCount === 1 ? "item" : "items"}`}
+                                  </div>
+                                </div>
+                                <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 text-[10px]">Service</Badge>
+                                <UserBadge userId={t.assigned_user || t.default_assigned_user} />
+                              </button>
                             }
                           />
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                            onClick={() => {
-                              const token = localStorage.getItem('access_token');
-                              fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
-                                method: "PUT",
-                                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-                                body: JSON.stringify({
-                                  name: t.name,
-                                  description: t.description || "",
-                                  repeat_type: t.repeat_type,
-                                  time_of_day: t.time_of_day || "anytime",
-                                  zone_id: t.zone_id,
-                                  photo_required: t.photo_required,
-                                  next_execution_date: null
-                                })
-                              }).then(res => {
-                                if (res.ok) {
-                                  queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
-                                  queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
-                                } else {
-                                  alert("Failed to unassign task");
-                                }
-                              }).catch(err => {
-                                console.error(err);
-                                alert("Failed to unassign task");
-                              });
-                            }}
-                            title="Remove from schedule"
-                          >
-                            Unassign
-                          </Button>
-                        </div>
+                        );
+                      })}
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              )}
+
+              {/* Mini Tasks */}
+              <AccordionItem value="mini" className="border-b-0 mt-4">
+                <AccordionTrigger className="bg-muted/30 px-4 rounded-t-md hover:no-underline font-semibold text-lg border">
+                  Mini Tasks ({miniTasks.length})
+                </AccordionTrigger>
+                <AccordionContent className="border border-t-0 rounded-b-md p-0 overflow-visible">
+                  {miniTasks.length === 0 ? (
+                    <p className="text-sm text-muted-foreground p-4 text-center">No mini tasks for this day</p>
+                  ) : (
+                    <div className="divide-y divide-border">
+                      {miniTasks.map((t, i) => (
+                        <TaskFormModal
+                          key={i}
+                          task={t}
+                          trigger={
+                            <div role="button" tabIndex={0} className={`flex items-center gap-3 p-3 group cursor-pointer hover:bg-muted/30 ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
+                              <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
+                                {t.name}
+                              </span>
+                              <OverdueBadge task={t} />
+                              <TaskPhotos task={t} />
+                              <UserBadge userId={t.assigned_user || t.default_assigned_user} />
+                              <Badge variant="secondary" className="text-xs capitalize">{t.tag}</Badge>
+                              <Pencil className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                            </div>
+                          }
+                        />
                       ))}
                     </div>
                   )}
@@ -266,63 +365,65 @@ export default function CalendarPage() {
                   ) : (
                     <div className="divide-y divide-border">
                       {projectTasks.map((t, i) => (
-                        <div key={i} className={`flex items-center gap-3 p-3 group ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
-                          {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
-                            <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
-                          ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
-                            <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
-                          ) : <span className="w-14" />}
-                          {t.status === 'Completed' && (
-                            <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
-                          )}
-                          <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
-                            {t.name}
-                          </span>
-                          <UserBadge userId={t.assigned_user || t.default_assigned_user} />
-                          <Badge variant="secondary" className="text-xs capitalize">{t.tag}</Badge>
-                          <TaskFormModal
-                            task={t}
-                            trigger={
-                              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity" title="Edit Task">
-                                <Pencil className="w-4 h-4" />
+                        <TaskFormModal
+                          key={i}
+                          task={t}
+                          trigger={
+                            <div role="button" tabIndex={0} className={`flex items-center gap-3 p-3 group cursor-pointer hover:bg-muted/30 ${t.status === 'Completed' ? 'opacity-70' : ''}`}>
+                              {(t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'morning' ? (
+                                <Badge variant="outline" className="bg-orange-500/10 text-orange-600 border-orange-500/20 text-[10px] w-14 justify-center">Morning 🌅</Badge>
+                              ) : (t.time_of_day || t.template?.time_of_day || 'anytime').toLowerCase() === 'evening' ? (
+                                <Badge variant="outline" className="bg-indigo-500/10 text-indigo-600 border-indigo-500/20 text-[10px] w-14 justify-center">Evening 🌙</Badge>
+                              ) : <span className="w-14" />}
+                              {t.status === 'Completed' && (
+                                <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
+                              )}
+                              <span className={`text-sm font-medium flex-1 ${t.status === 'Completed' ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
+                                {t.name}
+                              </span>
+                              <OverdueBadge task={t} />
+                              <TaskPhotos task={t} />
+                              <UserBadge userId={t.assigned_user || t.default_assigned_user} />
+                              <Badge variant="secondary" className="text-xs capitalize">{t.tag}</Badge>
+                              <Pencil className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const token = localStorage.getItem('access_token');
+                                  fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                                    method: "PUT",
+                                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+                                    body: JSON.stringify({
+                                      name: t.name,
+                                      description: t.description || "",
+                                      repeat_type: t.repeat_type,
+                                      time_of_day: t.time_of_day || "anytime",
+                                      zone_id: t.zone_id,
+                                      photo_required: t.photo_required,
+                                      next_execution_date: null
+                                    })
+                                  }).then(res => {
+                                    if (res.ok) {
+                                      queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
+                                      queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
+                                    } else {
+                                      alert("Failed to unassign task");
+                                    }
+                                  }).catch(err => {
+                                    console.error(err);
+                                    alert("Failed to unassign task");
+                                  });
+                                }}
+                                title="Remove from schedule"
+                              >
+                                Unassign
                               </Button>
-                            }
-                          />
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                            onClick={() => {
-                              const token = localStorage.getItem('access_token');
-                              fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
-                                method: "PUT",
-                                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-                                body: JSON.stringify({
-                                  name: t.name,
-                                  description: t.description || "",
-                                  repeat_type: t.repeat_type,
-                                  time_of_day: t.time_of_day || "anytime",
-                                  zone_id: t.zone_id,
-                                  photo_required: t.photo_required,
-                                  next_execution_date: null
-                                })
-                              }).then(res => {
-                                if (res.ok) {
-                                  queryClient.invalidateQueries({ queryKey: ['taskTemplates'] });
-                                  queryClient.invalidateQueries({ queryKey: ['adminCalendar'] });
-                                } else {
-                                  alert("Failed to unassign task");
-                                }
-                              }).catch(err => {
-                                console.error(err);
-                                alert("Failed to unassign task");
-                              });
-                            }}
-                            title="Remove from schedule"
-                          >
-                            Unassign
-                          </Button>
-                        </div>
+                            </div>
+                          }
+                        />
                       ))}
                     </div>
                   )}
@@ -757,6 +858,53 @@ export default function CalendarPage() {
               </Accordion>
             )}
           </div>
+        </div>
+
+        {/* Project Pool */}
+        <div className="card-atmos mt-6">
+          <div className="flex items-center gap-2 mb-4">
+            <CheckCircle2 className="w-5 h-5 text-success" />
+            <h3 className="text-xl font-semibold text-foreground">Project Pool</h3>
+            <Badge variant="secondary" className="ml-2 bg-success/10 text-success border-success/20">{completedProjects.length}</Badge>
+          </div>
+
+          {completedProjects.length === 0 ? (
+            <p className="text-sm text-muted-foreground p-4 text-center">No projects in the pool yet.</p>
+          ) : (
+            <Accordion type="single" collapsible className="w-full">
+              <AccordionItem value="done-projects" className="border border-success/20 rounded-lg bg-success/5 overflow-hidden">
+                <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-success/10 transition-colors [&[data-state=open]>div>svg]:rotate-180 group font-semibold text-success">
+                  <div className="flex gap-3 items-center flex-1">
+                    <span>View Project Pool</span>
+                  </div>
+                </AccordionTrigger>
+                <AccordionContent className="p-6 border-t border-success/20 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 bg-card overflow-visible">
+                  {completedProjects.map((t: any) => (
+                    <div key={t.id} className="border border-border/60 bg-background rounded-xl p-4 flex flex-col gap-3 shadow-sm hover:border-success/40 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <CheckCircle2 className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <span className="text-sm font-semibold text-foreground block truncate" title={t.template?.name || t.name}>
+                            {t.template?.name || t.name}
+                          </span>
+                          <div className="flex flex-col gap-1 mt-2">
+                            <div className="flex items-center gap-2">
+                              <Badge variant="outline" className="text-[10px] bg-muted/30 text-muted-foreground">
+                                {t.template?.time_of_day || t.time_of_day || "Anytime"}
+                              </Badge>
+                            </div>
+                            <span className="text-xs text-muted-foreground mt-1">
+                              Completed: <span className="font-medium text-foreground">{t.completed_at ? format(new Date(t.completed_at), "MMM d, yyyy 'at' h:mm a") : "Unknown"}</span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          )}
         </div>
       </div>
     </div>
