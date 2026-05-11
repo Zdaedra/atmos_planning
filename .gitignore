@@ -1,0 +1,68 @@
+# ============================================================
+# Atmos Planning — root .gitignore
+# Principle: Git stores ONLY source code.
+# Business data, AI workspace metadata, secrets stay local on
+# Mac / Hetzner / Notion / Drive depending on the data type.
+# ============================================================
+
+# --- AI workspace metadata (Claude Code local memory) ---
+# Memory Bank, raw Drive dumps, wording vault, summaries —
+# personal context for AI agents, lives locally only.
+.claude/
+
+# --- Environment & secrets ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+client_secret*.json
+oauth_token*.json
+service_account*.json
+
+# --- Databases (production data lives on Hetzner) ---
+*.db
+*.sqlite
+*.sqlite3
+backend/atmos_planning.db
+
+# --- Logs ---
+*.log
+backend/backend.log
+logs/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# --- Node / Frontend (frontends have own .gitignore, but just in case) ---
+node_modules/
+.next/
+dist/
+build/
+
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Debug artifacts (committed historically, but should be gitignored going forward) ---
+# Keep existing ones for now but block new ones via pattern:
+debug_*.html
+debug_*.png
+# (Existing bot_error*.png stays as already tracked)
+
+# --- AI tooling / scratch ---
+.aider*
+.cursor/
