@@ -34,8 +34,12 @@ export const startShift = async () => {
     return request("/auth/shift/start", { method: "POST" });
 };
 
-export const fetchDashboardData = async () => {
-    return request("/dashboard/");
+export const fetchDashboardData = async (date?: string, userId?: number) => {
+    const params = new URLSearchParams();
+    if (date) params.set("date", date);
+    if (userId !== undefined && userId !== null) params.set("user_id", String(userId));
+    const qs = params.toString();
+    return request(`/dashboard/${qs ? "?" + qs : ""}`);
 };
 
 export const fetchSupervisors = async () => {
@@ -54,6 +58,13 @@ export const markTaskComplete = async (payload: { task_id: number; comments?: st
             comments: payload.comments,
             photo_data_base64: payload.photo_data_base64
         })
+    });
+};
+
+export const bulkCompleteTasks = async (task_ids: number[]) => {
+    return request("/tasks/bulk-complete", {
+        method: "POST",
+        body: JSON.stringify({ task_ids })
     });
 };
 

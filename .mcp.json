@@ -1,0 +1,12 @@
+{
+  "_comment": "Atmos-specific MCP servers. github для репо (если будет), notion для бизнес-доков. Токены — из master .env.",
+  "mcpServers": {
+    "github-atmos": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}

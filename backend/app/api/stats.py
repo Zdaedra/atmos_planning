@@ -2,25 +2,31 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from app.core.database import get_db
+from app.core.security import require_admin
 from app.models.all import Task, User, Zone, Shift
+
+from app.core.time_utils import BALI_TZ, get_now, get_today_start, to_bali
 
 router = APIRouter()
 
 @router.get("/personnel")
-def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
+def get_personnel_stats(timeframe: str = "week",
+                        department: Optional[str] = None,
+                        _admin: User = Depends(require_admin),
+                        db: Session = Depends(get_db)):
     """
     Returns global completion/failed stats and a grid of supervisor performance metrics.
     """
-    now = datetime.now(timezone.utc)
+    now = get_now()
     if timeframe == "month":
         start_date = now - timedelta(days=30)
     elif timeframe == "today":
         start_date = now
     elif timeframe == "all":
-        start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        start_date = datetime(2020, 1, 1, tzinfo=BALI_TZ)
     else:
         start_date = now - timedelta(days=7)
         
@@ -36,25 +42,28 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
             "name": u.name,
             "role": u.role,
             "email": u.email,
-            "plain_password": getattr(u, "plain_password", None),
             "is_active": getattr(u, "is_active", True),
             "shifts_count": 0,
             "_distinct_days": set(),
             "daily": {"completed": 0, "failed": 0, "failed_percent": 0},
             "planned": {"completed": 0, "failed": 0, "failed_percent": 0},
             "project": {"completed": 0, "failed": 0, "failed_percent": 0},
+            "mini": {"completed": 0, "failed": 0, "failed_percent": 0},
             "assigned": {"completed": 0, "failed": 0, "failed_percent": 0},
             "avg_per_shift": 0.0
         } for u in users
     }
 
     from app.models.all import TaskTemplate
-    tasks = db.query(Task, TaskTemplate.repeat_type, TaskTemplate.time_of_day).join(
+    tasks_q = db.query(Task, TaskTemplate.repeat_type, TaskTemplate.time_of_day).join(
         TaskTemplate, Task.template_id == TaskTemplate.id, isouter=True
     ).filter(
         Task.scheduled_date >= start_date,
         Task.scheduled_date < end_date
-    ).all()
+    )
+    if department:
+        tasks_q = tasks_q.filter(TaskTemplate.department == department.lower())
+    tasks = tasks_q.all()
 
     # Pre-fetch shifts to map Unassigned tasks to all active shift supervisors
     active_shifts = db.query(Shift).filter(
@@ -76,9 +85,9 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
 
     for t, repeat_type, time_of_day in tasks:
         r_type = (repeat_type or "none").lower()
-        if r_type in ["weekly", "biweekly", "monthly", "planned", "bi-weekly"]:
+        if r_type in ["weekly", "biweekly", "monthly", "planned", "bi-weekly", "custom"]:
             r_type = "planned"
-        elif r_type in ["project", "daily"]:
+        elif r_type in ["project", "daily", "mini"]:
             pass
         else:
             r_type = "assigned"
@@ -98,7 +107,8 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
         for uid in target_uids:
             if task_shift in ["1", "2"] and d_str in shift_numbers_by_user_date and uid in shift_numbers_by_user_date[d_str]:
                 user_shift = str(shift_numbers_by_user_date[d_str][uid])
-                if task_shift != user_shift:
+                # shift_number=3 means "full day" — supervisor covers both shifts.
+                if user_shift != "3" and task_shift != user_shift:
                     continue
             actual_uids.add(uid)
             
@@ -119,7 +129,7 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
         del data["_distinct_days"]
         
         total_tasks = 0
-        for cat in ["daily", "planned", "project", "assigned"]:
+        for cat in ["daily", "planned", "project", "mini", "assigned"]:
             c = data[cat]["completed"]
             f = data[cat]["failed"]
             total = c + f
@@ -140,7 +150,10 @@ def get_personnel_stats(timeframe: str = "week", db: Session = Depends(get_db)):
     }
 
 @router.get("/personnel/{user_id}")
-def get_supervisor_details(user_id: int, timeframe: str = "week", db: Session = Depends(get_db)):
+def get_supervisor_details(user_id: int, timeframe: str = "week",
+                           department: Optional[str] = None,
+                           _admin: User = Depends(require_admin),
+                           db: Session = Depends(get_db)):
     """
     Returns detailed metrics for a specific supervisor's drawer card.
     """
@@ -148,13 +161,13 @@ def get_supervisor_details(user_id: int, timeframe: str = "week", db: Session = 
     if not user:
         return {"error": "User not found"}
 
-    now = datetime.now(timezone.utc)
+    now = get_now()
     if timeframe == "month":
         start_date = now - timedelta(days=30)
     elif timeframe == "today":
         start_date = now
     elif timeframe == "all":
-        start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        start_date = datetime(2020, 1, 1, tzinfo=BALI_TZ)
     else:
         start_date = now - timedelta(days=7)
     start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -170,11 +183,15 @@ def get_supervisor_details(user_id: int, timeframe: str = "week", db: Session = 
     valid_shift_dates = {s.start_time.strftime("%Y-%m-%d") for s in active_shifts if s.start_time}
 
     from sqlalchemy import or_
-    all_potential_tasks = db.query(Task).options(joinedload(Task.template)).filter(
+    from app.models.all import TaskTemplate as _T
+    aptq = db.query(Task).options(joinedload(Task.template)).filter(
         or_(Task.assigned_user == user_id, Task.assigned_user == None),
         Task.scheduled_date >= start_date,
         Task.scheduled_date < end_date
-    ).order_by(Task.scheduled_date.desc()).all()
+    )
+    if department:
+        aptq = aptq.join(_T, Task.template_id == _T.id).filter(_T.department == department.lower())
+    all_potential_tasks = aptq.order_by(Task.scheduled_date.desc()).all()
 
     completed_tasks = []
     failed_tasks = []
@@ -238,7 +255,6 @@ def get_supervisor_details(user_id: int, timeframe: str = "week", db: Session = 
             "name": user.name,
             "role": user.role,
             "email": user.email,
-            "plain_password": getattr(user, "plain_password", None),
             "last_login": user.last_login.isoformat() if user.last_login else None
         },
         "kpis": {
@@ -252,11 +268,14 @@ def get_supervisor_details(user_id: int, timeframe: str = "week", db: Session = 
 
 
 @router.get("/personnel/{user_id}/shifts")
-def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = Depends(get_db)):
+def get_supervisor_shifts(user_id: int, timeframe: str = "all",
+                          department: Optional[str] = None,
+                          _admin: User = Depends(require_admin),
+                          db: Session = Depends(get_db)):
     """
     Returns detailed daily shift metrics for a specific supervisor, identical in structure to personnel KPI cards.
     """
-    now = datetime.now(timezone.utc)
+    now = get_now()
     if timeframe == "month":
         start_date = now - timedelta(days=30)
     elif timeframe == "week":
@@ -264,17 +283,21 @@ def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = De
     elif timeframe == "today":
         start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
     else:
-        start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        start_date = datetime(2020, 1, 1, tzinfo=BALI_TZ)
     start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
     end_date = now + timedelta(days=1)
     end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
     from sqlalchemy import or_
-    tasks_by_user = db.query(Task).options(joinedload(Task.template), joinedload(Task.photos)).filter(
+    from app.models.all import TaskTemplate as _T2
+    tbq = db.query(Task).options(joinedload(Task.template), joinedload(Task.photos)).filter(
         or_(Task.assigned_user == user_id, Task.assigned_user == None),
         Task.scheduled_date >= start_date,
         Task.scheduled_date < end_date
-    ).order_by(Task.scheduled_date.desc()).all()
+    )
+    if department:
+        tbq = tbq.join(_T2, Task.template_id == _T2.id).filter(_T2.department == department.lower())
+    tasks_by_user = tbq.order_by(Task.scheduled_date.desc()).all()
 
     # Get valid dates where user actually started a shift
     valid_shift_dates = set()
@@ -301,6 +324,7 @@ def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = De
             "daily": {"completed": 0, "failed": 0, "failed_percent": 0},
             "planned": {"completed": 0, "failed": 0, "failed_percent": 0},
             "project": {"completed": 0, "failed": 0, "failed_percent": 0},
+            "mini": {"completed": 0, "failed": 0, "failed_percent": 0},
             "assigned": {"completed": 0, "failed": 0, "failed_percent": 0},
             "tasks": []
         }
@@ -321,12 +345,14 @@ def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = De
             r_type = (t.template.repeat_type or "").lower()
             task_shift = str(t.template.time_of_day).lower() if t.template.time_of_day else "anytime"
             
-        if task_shift in ["1", "2"] and task_shift != shift_numbers_by_date.get(d_str, "1"):
-            continue
+        if task_shift in ["1", "2"]:
+            user_shift = shift_numbers_by_date.get(d_str, "1")
+            if user_shift != "3" and task_shift != user_shift:
+                continue
             
-        if r_type in ["weekly", "biweekly", "bi-weekly", "monthly"]:
+        if r_type in ["weekly", "biweekly", "bi-weekly", "monthly", "custom"]:
             r_type = "planned"
-        elif r_type in ["project", "daily"]:
+        elif r_type in ["project", "daily", "mini"]:
             pass
         else:
             r_type = "assigned"
@@ -349,7 +375,7 @@ def get_supervisor_shifts(user_id: int, timeframe: str = "all", db: Session = De
     shifts = []
     for d_str, data in shift_map.items():
         total_tasks = 0
-        for cat in ["daily", "planned", "project", "assigned"]:
+        for cat in ["daily", "planned", "project", "mini", "assigned"]:
             c = data[cat]["completed"]
             f = data[cat]["failed"]
             total = c + f

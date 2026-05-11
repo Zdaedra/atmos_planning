@@ -1,4 +1,4 @@
-import { LayoutDashboard, Calendar, CheckSquare, Users, LogOut, BarChart3, BrainCircuit } from "lucide-react";
+import { LayoutDashboard, Calendar, CheckSquare, LogOut, BarChart3, BrainCircuit, Bell } from "lucide-react";
 import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import atmosLogo from "@/assets/atmos-logo.jpg";
@@ -9,6 +9,7 @@ const navItems = [
   { label: "Tasks", path: "/tasks", icon: CheckSquare },
   { label: "Staff", path: "/stats", icon: BarChart3 },
   { label: "AI Review", path: "/ai", icon: BrainCircuit },
+  { label: "AI Alerts", path: "/settings/alerts", icon: Bell },
 ];
 
 export function AppSidebar() {

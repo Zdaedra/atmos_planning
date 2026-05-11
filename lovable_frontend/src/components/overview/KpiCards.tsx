@@ -7,13 +7,14 @@ import { cn } from "@/lib/utils";
 interface KpiCardsProps {
   active: string | null;
   setActive: (val: string | null) => void;
+  dateKey?: string;
 }
 
-export function KpiCards({ active, setActive }: KpiCardsProps) {
+export function KpiCards({ active, setActive, dateKey }: KpiCardsProps) {
 
   const { data } = useQuery({
-    queryKey: ['dashboard'],
-    queryFn: fetchDashboardData
+    queryKey: ['dashboard', dateKey || 'today'],
+    queryFn: () => fetchDashboardData(dateKey),
   });
 
   const kpis = data?.kpis || {
@@ -29,7 +30,7 @@ export function KpiCards({ active, setActive }: KpiCardsProps) {
 
   const cards = [
     {
-      label: "Total Tasks Today",
+      label: "Total Tasks",
       value: kpis.total_tasks_today,
       icon: ListChecks,
       color: "text-foreground",

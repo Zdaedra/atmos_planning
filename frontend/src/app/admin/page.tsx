@@ -33,7 +33,7 @@ export default function AdminDashboard() {
                 </nav>
 
                 <div style={{ marginTop: "auto", padding: "0 16px" }}>
-                    <NavItem active={false} onClick={() => { }} icon={<Settings size={20} />} label="Settings" />
+                    <NavItem active={activeTab === "settings"} onClick={() => setActiveTab("settings")} icon={<Settings size={20} />} label="Settings" />
                 </div>
             </aside>
 
@@ -923,7 +923,7 @@ function UsersTab() {
         setEditingUser(user);
         setName(user.name);
         setEmail(user.email);
-        setPassword(user.plain_password || "");
+        setPassword(""); // never show stored password — admin must type a new one explicitly
         setShowForm(true);
     };
 
@@ -1030,9 +1030,6 @@ function UsersTab() {
                                 <div style={{ fontSize: "14px", color: "var(--muted)", marginBottom: "4px", display: "flex", alignItems: "center", gap: "6px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                     {user.email}
                                 </div>
-                                <div style={{ fontSize: "14px", color: "var(--text)", marginBottom: "12px", display: "flex", alignItems: "center", gap: "6px" }}>
-                                    <span style={{ fontWeight: 600 }}>Password:</span> {user.plain_password || <span style={{ color: "var(--warning)" }}>Protected</span>}
-                                </div>
                                 <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "16px" }}>
                                     <span style={{ padding: "4px 8px", background: "rgba(59, 130, 246, 0.1)", color: "var(--primary)", borderRadius: "4px", fontSize: "12px", fontWeight: "600", textTransform: "capitalize" }}>
                                         {user.role}
@@ -1040,6 +1037,17 @@ function UsersTab() {
                                 </div>
                                 <div style={{ display: "flex", gap: "8px" }}>
                                     <button onClick={() => openEditForm(user)} style={{ flex: 1, padding: "8px 0", background: "transparent", border: "1px solid var(--primary)", borderRadius: "8px", color: "var(--primary)", cursor: "pointer", fontSize: "14px", fontWeight: "500", transition: "all 0.2s" }} className="hover-brightness">Edit profile</button>
+                                    <button onClick={async () => {
+                                        if (!confirm(`Сгенерировать новый пароль для ${user.name}? Старый перестанет работать.`)) return;
+                                        const token = localStorage.getItem("access_token");
+                                        const r = await fetch(`https://api.trypranaextract.com/supervisors/${user.id}/reset-password`, {
+                                            method: "POST",
+                                            headers: { "Authorization": `Bearer ${token}` },
+                                        });
+                                        if (!r.ok) { alert("Не удалось сбросить пароль"); return; }
+                                        const data = await r.json();
+                                        prompt("Новый пароль (скопируйте — он больше не будет показан):", data.new_password);
+                                    }} style={{ padding: "8px 12px", background: "rgba(59, 130, 246, 0.1)", border: "none", borderRadius: "8px", color: "var(--primary)", cursor: "pointer", fontSize: "13px", fontWeight: 600, transition: "all 0.2s" }} className="hover-brightness">Reset PW</button>
                                     <button onClick={() => handleDeleteUser(user.id)} style={{ padding: "8px 12px", background: "rgba(239, 68, 68, 0.1)", border: "none", borderRadius: "8px", color: "var(--danger)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s" }} className="hover-brightness"><X size={16} /></button>
                                 </div>
                             </div>
@@ -1341,6 +1349,37 @@ function OverviewDashboard() {
     const [editingTask, setEditingTask] = useState<any | null>(null);
     const [allZones, setAllZones] = useState<any[]>([]);
 
+    // Bulk selection state
+    const [selectedTasks, setSelectedTasks] = useState<number[]>([]);
+    const [isCompletingMulti, setIsCompletingMulti] = useState(false);
+
+    const toggleTaskSelection = (taskId: number, e: any) => {
+        e.stopPropagation();
+        setSelectedTasks(prev =>
+            prev.includes(taskId) ? prev.filter(id => id !== taskId) : [...prev, taskId]
+        );
+    };
+
+    const handleBulkComplete = async () => {
+        if (!selectedTasks.length) return;
+        if (!confirm(`Mark ${selectedTasks.length} tasks as Completed?`)) return;
+        setIsCompletingMulti(true);
+        try {
+            await Promise.all(selectedTasks.map(id =>
+                fetch(`https://api.trypranaextract.com/tasks/${id}/status?status=Completed`, { method: 'PATCH' })
+            ));
+            const url = (process.env.NEXT_PUBLIC_API_URL && !process.env.NEXT_PUBLIC_API_URL.endsWith('/')) ? `${process.env.NEXT_PUBLIC_API_URL}/dashboard/` : "https://api.trypranaextract.com/dashboard/";
+            const fetchRes = await fetch(url);
+            if (fetchRes.ok) setData(await fetchRes.json());
+            setSelectedTasks([]);
+        } catch (e) {
+            console.error(e);
+            alert("Failed to complete some tasks.");
+        } finally {
+            setIsCompletingMulti(false);
+        }
+    };
+
     const handleViewReport = async (task: any) => {
         setViewPhotoTask(task);
         setLoadingPhotos(true);
@@ -1448,6 +1487,7 @@ function OverviewDashboard() {
     // Helper block for rendering a task row
     const renderTaskRow = (task: any, isOverdue = false) => {
         const isDone = task.status === "Completed";
+        const isSelected = selectedTasks.includes(task.id);
         return (
             <div key={task.id}
                 onClick={() => {
@@ -1458,24 +1498,38 @@ function OverviewDashboard() {
                     }
                 }}
                 style={{
-                    padding: "16px", background: "var(--background)", borderRadius: "12px",
+                    padding: "16px", background: isSelected ? "rgba(59, 130, 246, 0.1)" : "var(--background)", borderRadius: "12px",
                     borderLeft: `4px solid ${isDone ? 'var(--success)' : (isOverdue ? 'var(--danger)' : 'var(--primary)')}`,
                     display: "flex", justifyContent: "space-between", alignItems: "center",
                     opacity: isDone ? 0.7 : 1,
                     cursor: "pointer",
                     transition: "background 0.2s ease"
                 }}
-                onMouseEnter={(e) => e.currentTarget.style.background = "rgba(59, 130, 246, 0.05)"}
-                onMouseLeave={(e) => e.currentTarget.style.background = "var(--background)"}>
-                <div>
-                    <div style={{ fontWeight: "bold", fontSize: "16px", marginBottom: "4px", textDecoration: isDone ? "line-through" : "none", display: "flex", alignItems: "center", gap: "8px" }}>
-                        {task.template?.name || `Task #${task.id}`}
-                        <Edit size={14} style={{ color: "var(--muted)", opacity: 0.5 }} />
-                    </div>
-                    <div style={{ fontSize: "12px", color: "var(--muted)", display: "flex", gap: "12px" }}>
-                        <span><Clock size={12} style={{ display: "inline", marginBottom: "-2px" }} /> {task.template?.time_of_day || 'Anytime'}</span>
-                        <span style={{ textTransform: 'capitalize' }}><LayoutTemplate size={12} style={{ display: "inline", marginBottom: "-2px" }} /> {getFrequencyLabel(task)}</span>
-                        {isOverdue && <span style={{ color: "var(--danger)", fontWeight: "bold" }}>Transferred form {task.scheduled_date ? new Date(task.scheduled_date).toLocaleDateString() : 'past'}</span>}
+                onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "rgba(59, 130, 246, 0.05)"; }}
+                onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--background)"; }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: "16px" }}>
+                    {!isDone && (
+                        <div
+                            onClick={(e) => toggleTaskSelection(task.id, e)}
+                            style={{ cursor: "pointer", marginTop: "2px", flexShrink: 0 }}
+                        >
+                            {isSelected ? (
+                                <CheckCircle size={24} color="var(--primary)" fill="none" />
+                            ) : (
+                                <div style={{ width: "22px", height: "22px", borderRadius: "50%", border: "2px solid #cbd5e1", margin: "1px" }} />
+                            )}
+                        </div>
+                    )}
+                    <div>
+                        <div style={{ fontWeight: "bold", fontSize: "16px", marginBottom: "4px", textDecoration: isDone ? "line-through" : "none", display: "flex", alignItems: "center", gap: "8px" }}>
+                            {task.template?.name || `Task #${task.id}`}
+                            <Edit size={14} style={{ color: "var(--muted)", opacity: 0.5 }} />
+                        </div>
+                        <div style={{ fontSize: "12px", color: "var(--muted)", display: "flex", gap: "12px" }}>
+                            <span><Clock size={12} style={{ display: "inline", marginBottom: "-2px" }} /> {task.template?.time_of_day || 'Anytime'}</span>
+                            <span style={{ textTransform: 'capitalize' }}><LayoutTemplate size={12} style={{ display: "inline", marginBottom: "-2px" }} /> {getFrequencyLabel(task)}</span>
+                            {isOverdue && <span style={{ color: "var(--danger)", fontWeight: "bold" }}>Transferred form {task.scheduled_date ? new Date(task.scheduled_date).toLocaleDateString() : 'past'}</span>}
+                        </div>
                     </div>
                 </div>
                 <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
@@ -1574,6 +1628,21 @@ function OverviewDashboard() {
                 {/* Main Task List Area */}
                 <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
 
+                    {selectedTasks.length > 0 && (
+                        <div style={{ position: "sticky", top: "24px", zIndex: 100, background: "var(--card)", padding: "16px 24px", borderRadius: "16px", border: "1px solid var(--primary)", display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 10px 25px -5px rgba(0,0,0,0.1)", animation: "slideDown 0.2s ease" }}>
+                            <div style={{ fontWeight: "bold", fontSize: "16px", display: "flex", alignItems: "center", gap: "8px" }}>
+                                <CheckCircle size={20} color="var(--primary)" />
+                                {selectedTasks.length} {selectedTasks.length === 1 ? 'task' : 'tasks'} selected
+                            </div>
+                            <div style={{ display: "flex", gap: "12px" }}>
+                                <button onClick={() => setSelectedTasks([])} style={{ background: "transparent", color: "var(--muted)", border: "none", cursor: "pointer", fontWeight: "600" }}>Cancel</button>
+                                <button onClick={handleBulkComplete} disabled={isCompletingMulti} className="btn-primary" style={{ display: "flex", alignItems: "center", gap: "8px", width: "auto" }}>
+                                    {isCompletingMulti ? "Processing..." : "Mark as Done"}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Overdue Block */}
                     {filteredOverdue.length > 0 && (
                         <div style={{ background: "var(--card)", borderRadius: "16px", border: "1px solid var(--danger)", overflow: "hidden" }}>
@@ -1598,6 +1667,27 @@ function OverviewDashboard() {
                             </div>
                             {overdueExpanded && (
                                 <div style={{ padding: "24px", borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: "12px", animation: "fadeIn 0.2s ease" }}>
+                                    {filteredOverdue.length > 0 && (
+                                        <div style={{ padding: "0 8px 8px 8px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: "12px", marginBottom: "4px" }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={filteredOverdue.length > 0 && filteredOverdue.every((t: any) => selectedTasks.includes(t.id))}
+                                                onChange={(e) => {
+                                                    if (e.target.checked) {
+                                                        const newSelection = [...selectedTasks];
+                                                        filteredOverdue.forEach((t: any) => {
+                                                            if (!newSelection.includes(t.id)) newSelection.push(t.id);
+                                                        });
+                                                        setSelectedTasks(newSelection);
+                                                    } else {
+                                                        setSelectedTasks(selectedTasks.filter(id => !filteredOverdue.some((t: any) => t.id === id)));
+                                                    }
+                                                }}
+                                                style={{ width: "20px", height: "20px", cursor: "pointer", accentColor: "var(--primary)" }}
+                                            />
+                                            <span style={{ fontWeight: "500", fontSize: "15px" }}>Select All Overdue</span>
+                                        </div>
+                                    )}
                                     {filteredOverdue.map((t: any) => renderTaskRow(t, true))}
                                 </div>
                             )}
@@ -2100,7 +2190,7 @@ function CalendarTab() {
                 // Same day of the week, but every 2 weeks, starting from anchor week
                 if (selectedTime < anchorTime || selectedDate.getDay() !== anchorD.getDay()) return false;
                 const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-                const diffWeeks = Math.floor((selectedTime - anchorTime) / msPerWeek);
+                const diffWeeks = Math.floor((selectedTime - anchorTime + 12 * 60 * 60 * 1000) / msPerWeek);
                 return diffWeeks >= 0 && diffWeeks % 2 === 0;
             }
 
@@ -2323,17 +2413,47 @@ function CalendarTab() {
                         }}
                         tileContent={({ date, view }) => {
                             if (view === 'month') {
-                                const dayProjects = projectTemplates.filter(t => {
-                                    const d = new Date(t.next_execution_date);
-                                    return d.getDate() === date.getDate() && d.getMonth() === date.getMonth() && d.getFullYear() === date.getFullYear();
-                                });
-                                if (dayProjects.length > 0) {
+                                const eventsCount = templates.filter(t => {
+                                    const rpt = (t.repeat_type || "daily").toLowerCase();
+                                    if (rpt === 'daily') return false;
+
+                                    const anchorDateStr = t.next_execution_date;
+                                    if (!anchorDateStr) return false;
+
+                                    const anchorD = new Date(anchorDateStr);
+                                    const targetTime = date.getTime();
+                                    const anchorTime = new Date(anchorD.getFullYear(), anchorD.getMonth(), anchorD.getDate()).getTime();
+
+                                    if (rpt === 'project') {
+                                        return anchorD.getDate() === date.getDate() &&
+                                            anchorD.getMonth() === date.getMonth() &&
+                                            anchorD.getFullYear() === date.getFullYear();
+                                    }
+
+                                    if (rpt === 'weekly') {
+                                        return targetTime >= anchorTime && date.getDay() === anchorD.getDay();
+                                    }
+
+                                    if (rpt === 'biweekly') {
+                                        if (targetTime < anchorTime || date.getDay() !== anchorD.getDay()) return false;
+                                        const msPerWeek = 7 * 24 * 60 * 60 * 1000;
+                                        const diffWeeks = Math.floor((targetTime - anchorTime + 12 * 60 * 60 * 1000) / msPerWeek);
+                                        return diffWeeks >= 0 && diffWeeks % 2 === 0;
+                                    }
+
+                                    if (rpt === 'monthly') {
+                                        return targetTime >= anchorTime && date.getDate() === anchorD.getDate();
+                                    }
+
+                                    return false;
+                                }).length;
+
+                                if (eventsCount > 0) {
                                     return (
-                                        <div style={{ display: "flex", justifyContent: "center", gap: "2px", marginTop: "4px" }}>
-                                            {dayProjects.slice(0, 3).map((_, i) => (
-                                                <div key={i} style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--primary)" }} />
-                                            ))}
-                                            {dayProjects.length > 3 && <span style={{ fontSize: "10px", lineHeight: "6px", color: "var(--primary)" }}>+</span>}
+                                        <div style={{ display: "flex", justifyContent: "center", marginTop: "4px" }}>
+                                            <span style={{ fontSize: "11px", color: "var(--primary)", fontWeight: "600" }}>
+                                                {eventsCount}
+                                            </span>
                                         </div>
                                     );
                                 }

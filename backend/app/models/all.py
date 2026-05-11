@@ -9,7 +9,6 @@ class User(Base):
     name = Column(String, index=True)
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
-    plain_password = Column(String)
     device_id = Column(String, nullable=True)
     role = Column(String, default="supervisor") # supervisor, garden supervisor, admin, system_admin
     is_active = Column(Boolean, default=True)
@@ -46,12 +45,14 @@ class TaskTemplate(Base):
     name = Column(String)
     description = Column(Text)
     zone_id = Column(Integer, ForeignKey("zones.id"))
-    repeat_type = Column(String) # daily, weekly, biweekly, monthly
-    time_of_day = Column(String, default="anytime") # morning, evening, anytime
+    repeat_type = Column(String)  # daily, weekly, biweekly, monthly, project, custom, mini
+    repeat_interval_days = Column(Integer, nullable=True)  # used when repeat_type == "custom"
+    time_of_day = Column(String, default="anytime")  # 1, 2, anytime (=both shifts)
     photo_required = Column(Boolean, default=False)
-    checklist = Column(Text) # Stored as JSON string for simplicity
-    last_completed_at = Column(DateTime(timezone=True), nullable=True)
-    last_generated_date = Column(DateTime(timezone=True), nullable=True)
+    department = Column(String, default="maintenance", nullable=False)  # maintenance | service
+    supply = Column(Text, nullable=True)  # for service tasks: free-text list of supplies needed
+    supply_days_before = Column(Integer, nullable=True)  # how many days before the task date supplies must be ready
+    checklist = Column(Text)  # Stored as JSON string for simplicity
     next_execution_date = Column(DateTime(timezone=True), nullable=True)
     last_generated_date = Column(DateTime(timezone=True), nullable=True)
     default_assigned_user = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -64,10 +65,11 @@ class Task(Base):
     zone_id = Column(Integer, ForeignKey("zones.id"))
     assigned_user = Column(Integer, ForeignKey("users.id"))
     scheduled_date = Column(DateTime(timezone=True))
-    status = Column(String, default="Planned") # Planned, In progress, Done, Overdue, Completed
-    priority = Column(String, default="normal")
-    ai_status = Column(String, default="pending") # pending, approved, flagged
+    status = Column(String, default="Planned")  # Planned, In Progress, Completed, Overdue
+    actual_completed_at = Column(DateTime(timezone=True), nullable=True)
+    ai_status = Column(String, default="pending")  # pending, approved, flagged, rejected
     ai_reasoning = Column(Text, nullable=True)
+    is_supply = Column(Boolean, default=False, nullable=False)  # supply prep task for a service template
 
     photos = relationship("TaskPhoto", back_populates="task")
     comments = relationship("TaskComment", back_populates="task")
@@ -90,23 +92,6 @@ class TaskComment(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     task = relationship("Task", back_populates="comments")
 
-class ChangeRequest(Base):
-    __tablename__ = "change_requests"
-    id = Column(Integer, primary_key=True, index=True)
-    author = Column(String)
-    source = Column(String, default="telegram")
-    text = Column(Text)
-    status = Column(String, default="new") # new, in_progress, done, rejected
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-class TelegramMessage(Base):
-    __tablename__ = "telegram_messages"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String)
-    message = Column(Text)
-    transcription = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
 class SystemMessage(Base):
     __tablename__ = "system_messages"
     id = Column(Integer, primary_key=True, index=True)
@@ -114,4 +99,11 @@ class SystemMessage(Base):
     text = Column(String)
     is_read = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

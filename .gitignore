@@ -66,3 +66,24 @@ debug_*.png
 # --- AI tooling / scratch ---
 .aider*
 .cursor/
+
+# --- One-off dev/admin/seed scripts (contain hardcoded test credentials) ---
+# These are not production code — they're throw-away scripts for local debugging
+# and seeding. They contain test passwords like "pass123" and shouldn't ship.
+# Real admin / seed should live under scripts/ with env-var configuration.
+/create_admin.py
+/dump_tasks.py
+/openai_consult.py
+/patch_docker.py
+/query_users.py
+/take_screenshots.py
+/test_api.py
+/test_timezone.py
+/backend/add_alexey.py
+/backend/alter_db.py
+/backend/alter_db2.py
+/backend/check_bug.py
+/backend/check_bug2.py
+/backend/fix_shifts.py
+/backend/retroactive_tasks.py
+/backend/rewrite_tz.py

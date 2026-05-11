@@ -8,7 +8,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchDashboardData, markTaskComplete, revertTask } from "@/lib/api";
+import { fetchDashboardData, markTaskComplete, revertTask, fetchMe, bulkCompleteTasks } from "@/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -50,6 +50,7 @@ interface Task {
   frequency?: string;
   done: boolean;
   photo?: string;
+  photos?: string[];
   photoUploadedBy?: number;
   photoCreatedAt?: string;
   comment?: string;
@@ -65,11 +66,11 @@ import { Progress } from "@/components/ui/progress";
 
 type Tab = "today" | "completed" | "rates" | "staff";
 
-export function TaskFeed({ filter }: { filter?: string | null }) {
+export function TaskFeed({ filter, dateKey }: { filter?: string | null; dateKey?: string }) {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
-    queryKey: ['dashboard'],
-    queryFn: fetchDashboardData
+    queryKey: ['dashboard', dateKey || 'today'],
+    queryFn: () => fetchDashboardData(dateKey),
   });
 
   const completeMutation = useMutation({
@@ -88,7 +89,27 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
     },
   });
 
+  const bulkCompleteMutation = useMutation({
+    mutationFn: bulkCompleteTasks,
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      toast.success(data.message || "Tasks completed!");
+      setSelectedTasks(new Set());
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to bulk complete tasks");
+    }
+  });
+
+  const { data: me } = useQuery({
+    queryKey: ['me'],
+    queryFn: fetchMe,
+  });
+
+  const isAdmin = me?.role === 'admin' || me?.role === 'system_admin' || me?.role === 'Admin' || (me?.name && me.name.toLowerCase().includes('azad'));
+
   const [tab, setTab] = useState<Tab>("today");
+  const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (filter === "Completed") {
@@ -123,8 +144,9 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
     name: t.template?.name || `Task #${t.id}`,
     timeOfDay: t.template?.time_of_day || "Anytime",
     done: t.status === "Completed",
-    comment: t.comments?.[0]?.text, // Assumes backend dashboard endpoint injects recent comment if any
+    comment: t.comments?.[0]?.text,
     photo: t.photos?.[0]?.url,
+    photos: (t.photos || []).map((p: any) => p?.url).filter(Boolean) as string[],
     photoUploadedBy: t.photos?.[0]?.uploaded_by,
     photoCreatedAt: t.photos?.[0]?.created_at,
     description: t.template?.description,
@@ -149,14 +171,16 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
   }));
 
   const allTodayRaw = data?.today_tasks || [];
-  const dailyTasksRaw = allTodayRaw.filter((t: any) => t.template?.repeat_type === "daily").map(formatTask);
-  const longTermTasksRaw = allTodayRaw.filter((t: any) => ["weekly", "bi-weekly", "biweekly", "monthly"].includes(t.template?.repeat_type)).map(formatTask);
-  const projectTasksRaw = allTodayRaw.filter((t: any) => t.template?.repeat_type === "project").map(formatTask);
+  const dailyTasksRaw = allTodayRaw.filter((t: any) => (t.template?.repeat_type || "").toLowerCase() === "daily").map(formatTask);
+  const longTermTasksRaw = allTodayRaw.filter((t: any) => ["weekly", "bi-weekly", "biweekly", "monthly", "custom"].includes((t.template?.repeat_type || "").toLowerCase())).map(formatTask);
+  const miniTasksRaw = allTodayRaw.filter((t: any) => (t.template?.repeat_type || "").toLowerCase() === "mini").map(formatTask);
+  const projectTasksRaw = allTodayRaw.filter((t: any) => (t.template?.repeat_type || "").toLowerCase() === "project").map(formatTask);
 
   const tasksRaw = [
     ...overdueTasksRaw.map((t: any) => ({ ...t, timeOfDay: undefined })),
     ...dailyTasksRaw,
     ...longTermTasksRaw,
+    ...miniTasksRaw,
     ...projectTasksRaw,
   ];
 
@@ -178,6 +202,9 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
   );
   const longTerm = todayTasks.filter((t: any) =>
     longTermTasksRaw.some((l: any) => l.id === t.id)
+  );
+  const mini = todayTasks.filter((t: any) =>
+    miniTasksRaw.some((m: any) => m.id === t.id)
   );
   const project = todayTasks.filter((t: any) =>
     projectTasksRaw.some((p: any) => p.id === t.id)
@@ -226,12 +253,24 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
     setViewTask(null);
   }
 
-  function TaskRow({ task }: { task: Task }) {
+  function TaskRow({ task, isOverdue }: { task: Task, isOverdue?: boolean }) {
+    const isSelected = selectedTasks.has(task.id);
+    const useBulkSelection = isAdmin && isOverdue;
+
     return (
       <div className="flex items-center gap-3 py-3 px-4 border-b border-border last:border-b-0 group">
         <Checkbox
-          checked={task.done}
-          onCheckedChange={() => !task.done && handleComplete(task)}
+          checked={useBulkSelection ? isSelected : task.done}
+          onCheckedChange={() => {
+            if (useBulkSelection) {
+              const newSet = new Set(selectedTasks);
+              if (isSelected) newSet.delete(task.id);
+              else newSet.add(task.id);
+              setSelectedTasks(newSet);
+            } else if (!task.done) {
+              handleComplete(task);
+            }
+          }}
         />
         <span
           className={`flex-1 text-sm font-medium cursor-pointer hover:text-primary transition-colors ${task.done
@@ -279,20 +318,42 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
           <p className="text-sm font-medium text-muted-foreground line-through truncate">
             {task.name}
           </p>
-          {(formattedTime || supervisorName) && (
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {formattedTime} {supervisorName ? `• ${supervisorName}` : ""}
-            </p>
-          )}
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground/80 border border-border">
+              {task.repeatType || "Daily"}
+            </span>
+            {(formattedTime || supervisorName) && (
+              <span className="text-xs text-muted-foreground truncate">
+                {formattedTime} {supervisorName ? `• ${supervisorName}` : ""}
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center gap-2 flex-shrink-0">
           {task.comment && (
             <MessageSquare className="w-3.5 h-3.5 text-muted-foreground" />
           )}
-          {task.photo && (
-            <div className="w-6 h-6 rounded overflow-hidden border border-border">
-              <img src={task.photo} alt="Preview" className="w-full h-full object-cover" />
+          {(task.photos && task.photos.length > 0) && (
+            <div className="flex gap-1">
+              {task.photos.slice(0, 3).map((url, idx) => (
+                <a
+                  key={idx}
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <img
+                    src={url}
+                    alt="Proof"
+                    className="w-10 h-10 rounded object-cover border border-border hover:opacity-80 transition-opacity"
+                  />
+                </a>
+              ))}
+              {task.photos.length > 3 && (
+                <span className="text-[10px] text-muted-foreground self-center">+{task.photos.length - 3}</span>
+              )}
             </div>
           )}
         </div>
@@ -311,7 +372,7 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
             <AccordionItem value="overdue" className="border-0">
               <div className="status-overdue rounded-lg overflow-hidden">
                 <AccordionTrigger className="px-4 py-3 hover:no-underline">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap w-full">
                     <AlertCircle className="w-4 h-4 text-destructive" />
                     <span className="text-sm font-semibold text-destructive">
                       Overdue Carry-over
@@ -322,8 +383,43 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
                   </div>
                 </AccordionTrigger>
                 <AccordionContent>
+                  {isAdmin && (
+                    <div className="px-4 py-3 bg-muted/40 border-b border-border flex justify-between items-center">
+                      <div className="flex items-center gap-3">
+                        <Checkbox
+                          checked={overdue.length > 0 && overdue.every(t => selectedTasks.has(t.id))}
+                          onCheckedChange={(checked) => {
+                            const newSet = new Set(selectedTasks);
+                            if (checked) {
+                              overdue.forEach(t => newSet.add(t.id));
+                            } else {
+                              overdue.forEach(t => newSet.delete(t.id));
+                            }
+                            setSelectedTasks(newSet);
+                          }}
+                        />
+                        <span className="text-sm font-medium text-foreground">
+                          {selectedTasks.size > 0 ? `${selectedTasks.size} overdue tasks selected` : "Select All"}
+                        </span>
+                      </div>
+                      {selectedTasks.size > 0 && (
+                        <Button
+                          size="sm"
+                          variant="default"
+                          className="h-8"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            bulkCompleteMutation.mutate(Array.from(selectedTasks).map(id => parseInt(id)));
+                          }}
+                          disabled={bulkCompleteMutation.isPending}
+                        >
+                          Mark Done (Bypass Photos)
+                        </Button>
+                      )}
+                    </div>
+                  )}
                   {overdue.map((t) => (
-                    <TaskRow key={t.id} task={t} />
+                    <TaskRow key={t.id} task={t} isOverdue={true} />
                   ))}
                 </AccordionContent>
               </div>
@@ -369,6 +465,29 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
                 </AccordionTrigger>
                 <AccordionContent>
                   {longTerm.map((t) => (
+                    <TaskRow key={t.id} task={t} />
+                  ))}
+                </AccordionContent>
+              </div>
+            </AccordionItem>
+          )}
+
+          {mini.length > 0 && (
+            <AccordionItem value="mini" className="border-0">
+              <div className="status-longterm rounded-lg overflow-hidden">
+                <AccordionTrigger className="px-4 py-3 hover:no-underline">
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-primary" />
+                    <span className="text-sm font-semibold text-foreground">
+                      Mini Tasks
+                    </span>
+                    <span className="text-xs text-muted-foreground ml-2">
+                      {mini.length}
+                    </span>
+                  </div>
+                </AccordionTrigger>
+                <AccordionContent>
+                  {mini.map((t) => (
                     <TaskRow key={t.id} task={t} />
                   ))}
                 </AccordionContent>
@@ -436,7 +555,7 @@ export function TaskFeed({ filter }: { filter?: string | null }) {
                     <span className="font-medium text-foreground">{sub.label}</span>
                     <span className="text-muted-foreground">{sub.completed} / {sub.count} ({sub.rate}%)</span>
                   </div>
-                  <Progress value={sub.rate} className="h-2" indicatorClassName={sub.color} />
+                  <Progress value={sub.rate} className="h-2" />
                 </div>
               ));
             })()}

@@ -1,11 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
+from typing import Optional
 from app.core.database import get_db
-from app.models.all import Task, TaskPhoto, TaskTemplate
+from app.core.security import get_current_user, require_admin
+from app.models.all import Task, TaskPhoto, TaskTemplate, User, AppSetting
 import os
 import json
 import httpx
 import logging
+
+from app.core.time_utils import BALI_TZ, get_now, get_today_start, to_bali
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -124,59 +128,190 @@ async def verify_task_photos_ai(task_id: int):
         db.close()
 
 
+DEFAULT_OVERDUE_ALERT_DAYS = {
+    "daily": 1,
+    "weekly": 2,
+    "biweekly": 3,
+    "monthly": 5,
+    "custom": 2,
+    "project": 2,
+    "mini": 1,
+}
+ALERT_GROUPS = list(DEFAULT_OVERDUE_ALERT_DAYS.keys())
+_SETTING_KEY = "alert_days."
+
+
+def _setting_key(repeat_type: str) -> str:
+    return _SETTING_KEY + repeat_type.lower()
+
+
+def _read_group_threshold(db: Session, repeat_type: str) -> int:
+    """Resolve threshold for a repeat_type group: app_settings override → hardcoded default."""
+    rt = (repeat_type or "").lower()
+    row = db.query(AppSetting).filter(AppSetting.key == _setting_key(rt)).first()
+    if row and row.value is not None:
+        try:
+            n = int(row.value)
+            if n >= 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_OVERDUE_ALERT_DAYS.get(rt, 1)
+
+
+def _alert_threshold(db: Session, template) -> int:
+    rt = (getattr(template, "repeat_type", None) or "").lower() if template else ""
+    return _read_group_threshold(db, rt)
+
+
+def _set_group_threshold(db: Session, repeat_type: str, days: Optional[int]) -> None:
+    rt = (repeat_type or "").lower()
+    if rt not in DEFAULT_OVERDUE_ALERT_DAYS:
+        raise HTTPException(status_code=400, detail=f"Unknown repeat_type group: {repeat_type}")
+    key = _setting_key(rt)
+    row = db.query(AppSetting).filter(AppSetting.key == key).first()
+    if days is None:
+        if row:
+            db.delete(row)
+        return
+    if days < 0:
+        raise HTTPException(status_code=400, detail="overdue_alert_days must be >= 0")
+    if row:
+        row.value = str(days)
+    else:
+        db.add(AppSetting(key=key, value=str(days)))
+
+
 @router.get("/review-feed")
-def get_ai_review_feed(db: Session = Depends(get_db)):
+def get_ai_review_feed(
+    date: Optional[str] = None,
+    department: Optional[str] = None,
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     """
-    Returns tasks that were scheduled before today but are not completed.
-    Splits them into daily vs planned/project tasks.
+    Alerts that FIRE on the given day (Bali tz). `date=YYYY-MM-DD`. Default=today.
+
+    An alert fires on day D for a task when:
+      * task is not Completed by start_of(D), AND
+      * floor((D - scheduled_date) days) == threshold for its repeat_type group.
+
+    This produces a daily feed (no accumulation across days).
     """
-    from datetime import datetime, timezone
-    
-    now_utc = datetime.now(timezone.utc)
-    today_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
-    
-    # All overdue tasks
-    overdue_tasks = db.query(Task).filter(
-        Task.scheduled_date < today_start,
-        Task.status != "Completed"
-    ).order_by(Task.scheduled_date.asc()).all()
-    
-    daily_overdue = []
-    project_overdue = []
-    
+    from datetime import datetime, timedelta
     from app.models.all import User
-    
-    for t in overdue_tasks:
+
+    if date:
+        try:
+            d = datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
+        cutoff = datetime(d.year, d.month, d.day, tzinfo=BALI_TZ)
+    else:
+        now_utc = get_now()
+        cutoff = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=BALI_TZ)
+    cutoff_end = cutoff + timedelta(days=1)
+
+    # Cap the candidate window: tasks scheduled in [cutoff - 60d, cutoff)
+    # (per-template thresholds default <=5d; 60 is a generous safety net).
+    cand_q = (
+        db.query(Task)
+        .filter(
+            Task.scheduled_date < cutoff,
+            Task.scheduled_date >= cutoff - timedelta(days=60),
+            (Task.actual_completed_at.is_(None)) | (Task.actual_completed_at >= cutoff),
+        )
+    )
+    if department:
+        cand_q = cand_q.join(TaskTemplate, Task.template_id == TaskTemplate.id).filter(
+            TaskTemplate.department == department.lower()
+        )
+    candidates = cand_q.order_by(Task.scheduled_date.asc()).all()
+
+    daily_alerts = []
+    project_alerts = []
+
+    for t in candidates:
+        if not t.scheduled_date:
+            continue
         template = db.query(TaskTemplate).filter(TaskTemplate.id == t.template_id).first()
-        user = db.query(User).filter(User.id == t.assigned_user).first()
-        
-        days_overdue = (today_start - t.scheduled_date).days if t.scheduled_date else 0
-        if days_overdue < 1:
-            days_overdue = 1
-            
+        threshold = _alert_threshold(db, template)
+        days_overdue = (cutoff - t.scheduled_date).days
+        # Alert fires on the exact day the task crosses the threshold.
+        if days_overdue != threshold:
+            continue
+
+        user = db.query(User).filter(User.id == t.assigned_user).first() if t.assigned_user else None
         task_data = {
             "task_id": t.id,
             "task_name": template.name if template else f"Task #{t.id}",
-            "task_status": t.status,
-            "assigned_user_name": user.name if user else "Unassigned",
-            "assigned_user_avatar": user.avatar_url if user and hasattr(user, 'avatar_url') else None,
+            "assigned_user_name": user.name if user else None,
+            "assigned_user_avatar": user.avatar_url if user and hasattr(user, "avatar_url") else None,
             "scheduled_date": t.scheduled_date.isoformat() if t.scheduled_date else None,
             "days_overdue": days_overdue,
+            "alert_threshold": threshold,
+            "repeat_type": (template.repeat_type if template else None),
         }
-        
-        if template and template.repeat_type == "daily":
-            daily_overdue.append(task_data)
+        if template and (template.repeat_type or "").lower() == "daily":
+            daily_alerts.append(task_data)
         else:
-            project_overdue.append(task_data)
-            
+            project_alerts.append(task_data)
+
     return {
-        "daily": daily_overdue,
-        "planned": project_overdue
+        "as_of": cutoff.date().isoformat(),
+        "daily": daily_alerts,
+        "planned": project_alerts,
+    }
+
+
+@router.get("/alerts/settings")
+def list_alert_settings(_admin: User = Depends(require_admin),
+                        db: Session = Depends(get_db)):
+    """
+    Per-group alert thresholds. Each row reports the hardcoded default for the group
+    plus the current override (if any) and the effective value being used.
+    """
+    rows = db.query(AppSetting).filter(AppSetting.key.like(_SETTING_KEY + "%")).all()
+    overrides = {r.key.replace(_SETTING_KEY, ""): int(r.value) for r in rows if r.value is not None}
+    template_counts = {
+        rt: db.query(TaskTemplate).filter(TaskTemplate.repeat_type == rt).count()
+        for rt in ALERT_GROUPS
+    }
+    groups = []
+    for rt in ALERT_GROUPS:
+        override = overrides.get(rt)
+        groups.append({
+            "repeat_type": rt,
+            "default": DEFAULT_OVERDUE_ALERT_DAYS[rt],
+            "override": override,
+            "effective": override if override is not None else DEFAULT_OVERDUE_ALERT_DAYS[rt],
+            "template_count": template_counts.get(rt, 0),
+        })
+    return {"groups": groups}
+
+
+@router.put("/alerts/settings/{repeat_type}")
+def update_alert_group(repeat_type: str,
+                       overdue_alert_days: Optional[int] = None,
+                       _admin: User = Depends(require_admin),
+                       db: Session = Depends(get_db)):
+    """
+    Set (or clear, by omitting the param) the alert threshold for a repeat-type group.
+    Without `overdue_alert_days` the group reverts to the hardcoded default.
+    """
+    _set_group_threshold(db, repeat_type, overdue_alert_days)
+    db.commit()
+    return {
+        "repeat_type": repeat_type.lower(),
+        "override": overdue_alert_days,
+        "effective": _read_group_threshold(db, repeat_type),
     }
 
 
 @router.post("/{task_id}/resolve")
-def resolve_ai_flag(task_id: int, action: str, db: Session = Depends(get_db)):
+def resolve_ai_flag(task_id: int, action: str,
+                    _admin: User = Depends(require_admin),
+                    db: Session = Depends(get_db)):
     """
     action: 'accept' (ignore AI and approve) or 'reject' (send back for rework)
     """
@@ -199,14 +334,15 @@ def resolve_ai_flag(task_id: int, action: str, db: Session = Depends(get_db)):
 
 
 @router.get("/insights")
-async def generate_staff_insights(db: Session = Depends(get_db)):
+async def generate_staff_insights(_admin: User = Depends(require_admin),
+                                  db: Session = Depends(get_db)):
     """
     Generates AI insights based on the OVERDUE tasks (what is not being done).
     """
     from datetime import datetime, timezone
     
-    now_utc = datetime.now(timezone.utc)
-    today_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
+    now_utc = get_now()
+    today_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=BALI_TZ)
     
     overdue_tasks = db.query(Task).filter(
         Task.scheduled_date < today_start,
