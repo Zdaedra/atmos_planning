@@ -1,4 +1,4 @@
-import { Navigate, Outlet } from "react-router-dom";
+import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { AppSidebar } from "./AppSidebar";
 import { DepartmentSwitcher } from "./DepartmentSwitcher";
 import { getAuthToken, fetchMe, startShift } from "@/lib/api";
@@ -11,6 +11,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 export function AppLayout() {
   const token = getAuthToken();
   const queryClient = useQueryClient();
+  const location = useLocation();
+  // Department switcher (Maintenance/Service) only applies to the original Atmos
+  // task module — Steam booking has its own service axis (steam vs massage) and
+  // showing the chip there only confuses managers.
+  const hideDepartmentSwitcher = location.pathname.startsWith("/steam");
 
   const { data: me, isLoading } = useQuery({
     queryKey: ['me'],
@@ -41,7 +46,7 @@ export function AppLayout() {
     <div className="min-h-screen bg-background">
       <AppSidebar />
       <main className="ml-0 md:ml-[260px] min-h-screen">
-        <DepartmentSwitcher />
+        {!hideDepartmentSwitcher && <DepartmentSwitcher />}
         <Outlet />
       </main>
 

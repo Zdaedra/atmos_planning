@@ -1,0 +1,10 @@
+{% extends "steam/_base.html" %}
+{% block content %}
+<h1>Hi {{ name }}.</h1>
+<p>Tap the link below on the phone you'll use at the entrance:</p>
+
+<p><a href="{{ activation_url }}" class="btn">Open scanner</a></p>
+
+<p class="small">This link works only once. After tapping it, you'll stay signed in for 24 hours.</p>
+<p class="small">If you didn't expect this email, you can ignore it.</p>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "steam/_base.html" %}
+{% block content %}
+<h1>Your session time has changed.</h1>
+<p>The organizer has updated the time of your booking:</p>
+
+<div class="meta">
+  <div>Was: <strong>{{ old_weekday }}, {{ old_date_human }} · {{ old_time_human }}</strong></div>
+  <div>Now: <strong>{{ new_weekday }}, {{ new_date_human }} · {{ new_time_human }}</strong></div>
+</div>
+
+<p>Your booking code stays the same: <span class="code">{{ code }}</span></p>
+
+<p>If the new time doesn't work for you, you can cancel:</p>
+<p><a href="{{ cancel_url }}" class="btn">Cancel booking</a></p>
+{% endblock %}
