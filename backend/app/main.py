@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 import os
 
-from app.api import auth, tasks, shifts, media, locations, dashboard, supervisors, stats, messages, ai
+from app.api import auth, tasks, shifts, media, locations, dashboard, supervisors, stats, messages, ai, steam
 from app.core.database import engine
 from app.models.all import Base
+from app.models import steam as _steam_models  # noqa: F401  — register tables with Base.metadata
 
 app = FastAPI(title="Atmos Operations API")
 
@@ -51,6 +52,27 @@ _MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_task_comments_task_id ON task_comments (task_id)",
     "CREATE INDEX IF NOT EXISTS ix_shifts_user_id ON shifts (user_id)",
     "CREATE INDEX IF NOT EXISTS ix_shifts_start_time ON shifts (start_time)",
+    # ---- Steam booking module: multi-service support (steam + massage + …) ----
+    # Tables keep the steam_* prefix as a historical naming choice — the data inside
+    # now covers every service_type, not just steam. Renaming would break running prod.
+    "ALTER TABLE steam_settings ADD COLUMN IF NOT EXISTS max_massage_bookings_per_guest INTEGER NOT NULL DEFAULT 5",
+    "ALTER TABLE steam_slot_templates ADD COLUMN IF NOT EXISTS service_type VARCHAR NOT NULL DEFAULT 'steam'",
+    "ALTER TABLE steam_slot_templates ADD COLUMN IF NOT EXISTS therapist VARCHAR",
+    "ALTER TABLE steam_slot_templates ADD COLUMN IF NOT EXISTS room VARCHAR",
+    "ALTER TABLE steam_slot_templates ADD COLUMN IF NOT EXISTS variant VARCHAR",
+    "ALTER TABLE steam_slot_templates DROP CONSTRAINT IF EXISTS steam_slot_templates_service_chk",
+    "ALTER TABLE steam_slot_templates ADD CONSTRAINT steam_slot_templates_service_chk CHECK (service_type IN ('steam','massage'))",
+    "ALTER TABLE steam_slots ADD COLUMN IF NOT EXISTS service_type VARCHAR NOT NULL DEFAULT 'steam'",
+    "ALTER TABLE steam_slots ADD COLUMN IF NOT EXISTS therapist VARCHAR",
+    "ALTER TABLE steam_slots ADD COLUMN IF NOT EXISTS room VARCHAR",
+    "ALTER TABLE steam_slots ADD COLUMN IF NOT EXISTS variant VARCHAR",
+    "ALTER TABLE steam_slots DROP CONSTRAINT IF EXISTS steam_slots_service_chk",
+    "ALTER TABLE steam_slots ADD CONSTRAINT steam_slots_service_chk CHECK (service_type IN ('steam','massage'))",
+    "CREATE INDEX IF NOT EXISTS ix_steam_slots_service_starts ON steam_slots (service_type, starts_at)",
+    "ALTER TABLE steam_bookings ADD COLUMN IF NOT EXISTS service_type VARCHAR NOT NULL DEFAULT 'steam'",
+    "ALTER TABLE steam_bookings DROP CONSTRAINT IF EXISTS steam_bookings_service_chk",
+    "ALTER TABLE steam_bookings ADD CONSTRAINT steam_bookings_service_chk CHECK (service_type IN ('steam','massage'))",
+    "CREATE INDEX IF NOT EXISTS ix_steam_bookings_service_status ON steam_bookings (service_type, status)",
 ]
 
 with engine.begin() as conn:
@@ -60,6 +82,19 @@ with engine.begin() as conn:
         except Exception as e:
             # Log and continue — these are best-effort, idempotent ops.
             print(f"[migrations] '{sql}' failed: {e}", flush=True)
+
+# Seed the steam_settings singleton (id=1) if missing. Python-side defaults
+# on the model populate the rest of the columns.
+try:
+    from app.core.database import SessionLocal
+    from app.services.steam_settings import get_or_create_settings
+    _seed_db = SessionLocal()
+    try:
+        get_or_create_settings(_seed_db)
+    finally:
+        _seed_db.close()
+except Exception as e:
+    print(f"[steam] seed failed: {e}", flush=True)
 
 _default_origins = "https://admin.trypranaextract.com,https://app.trypranaextract.com"
 _allow_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", _default_origins).split(",") if o.strip()]
@@ -82,6 +117,7 @@ app.include_router(supervisors.router, prefix="/supervisors", tags=["supervisors
 app.include_router(stats.router, prefix="/stats", tags=["stats"])
 app.include_router(messages.router, prefix="/messages", tags=["messages"])
 app.include_router(ai.router, prefix="/ai", tags=["ai"])
+app.include_router(steam.router, prefix="/steam", tags=["steam"])
 
 
 @app.get("/health")

@@ -1,0 +1,19 @@
+{% extends "steam/_base.html" %}
+{% block content %}
+<h1>Booking cancelled.</h1>
+<p>Your session has been cancelled:</p>
+
+<div class="meta">
+  <div><strong>📅</strong> {{ weekday }}, {{ date_human }}</div>
+  <div><strong>🕕</strong> {{ time_human }}</div>
+  {% if service_type == 'massage' and variant %}
+  <div><strong>💆</strong> {{ variant }}{% if therapist %} with {{ therapist }}{% endif %}</div>
+  {% endif %}
+</div>
+
+<p>The spot is now available for other guests.</p>
+
+{% if public_url %}
+<p>If this was a mistake, you can book again at <a href="{{ public_url }}">{{ public_url }}</a>.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends "steam/_base.html" %}
+{% block content %}
+<h1>You're booked.</h1>
+<p>{% if multiple %}Your sessions are confirmed.{% else %}Your session is confirmed.{% endif %}</p>
+
+{% for b in bookings %}
+<hr>
+<div class="meta">
+  <div><strong>📅</strong> {{ b.weekday }}, {{ b.date_human }}</div>
+  <div><strong>🕕</strong> {{ b.time_human }}</div>
+  <div><strong>📍</strong> {{ location_name }}{% if b.room %} · {{ b.room }}{% endif %}</div>
+  {% if b.service_type == 'massage' %}
+  <div><strong>💆</strong> {{ b.variant or 'Massage' }}{% if b.therapist %} with {{ b.therapist }}{% endif %}</div>
+  {% endif %}
+</div>
+
+<div class="qr">
+  <img src="{{ b.qr_data_uri }}" alt="QR code {{ b.code }}">
+  <div class="code">{{ b.code }}</div>
+</div>
+
+<p class="small">Entry opens {{ qr_valid_before_slot_minutes }} minutes before the session starts. Please arrive on time — late entries are not allowed.</p>
+
+<p><a href="{{ b.cancel_url }}" class="btn">Cancel this booking</a></p>
+{% endfor %}
+
+<hr>
+<p class="small">If you didn't make this booking, just ignore this email.</p>
+{% endblock %}

@@ -87,3 +87,11 @@ debug_*.png
 /backend/fix_shifts.py
 /backend/retroactive_tasks.py
 /backend/rewrite_tz.py
+
+# Obsidian per-project local settings (won't exist actually since vault is parent, but defensive)
+.obsidian/
+
+# --- Local-only screenshots/captures from review sessions ---
+.playwright-mcp/
+/steam-*.png
+/v[0-9]-*.png

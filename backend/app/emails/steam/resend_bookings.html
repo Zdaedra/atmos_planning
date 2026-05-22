@@ -1,0 +1,24 @@
+{% extends "steam/_base.html" %}
+{% block content %}
+<h1>Your active bookings.</h1>
+
+{% if not bookings %}
+<p>You don't have any active bookings right now.</p>
+{% else %}
+<p>Here are all your active sessions:</p>
+{% for b in bookings %}
+<hr>
+<div class="meta">
+  <div><strong>📅</strong> {{ b.weekday }}, {{ b.date_human }} · {{ b.time_human }}</div>
+  {% if b.service_type == 'massage' and b.variant %}
+  <div><strong>💆</strong> {{ b.variant }}{% if b.therapist %} with {{ b.therapist }}{% endif %}</div>
+  {% endif %}
+</div>
+<div class="qr">
+  <img src="{{ b.qr_data_uri }}" alt="QR code {{ b.code }}">
+  <div class="code">{{ b.code }}</div>
+</div>
+<p><a href="{{ b.cancel_url }}" class="btn">Cancel this booking</a></p>
+{% endfor %}
+{% endif %}
+{% endblock %}
