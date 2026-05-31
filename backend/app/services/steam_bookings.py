@@ -14,7 +14,7 @@ delivery webhook flips them to 'confirmed'. The decision is per-request, so ther
 no migration step: the moment a manager fills in the Resend address, the next booking
 will follow the email-gated path.
 """
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.core.time_utils import BALI_TZ
 from app.models.steam import SteamBooking, SteamSlot
-from app.services import steam_cache, steam_email, steam_events
+from app.services import steam_cache, steam_day_overrides, steam_email, steam_events
 from app.services.steam_settings import get_or_create_settings
 from app.services.steam_tokens import gen_cancel_token, gen_qr_token, gen_unique_code
 
@@ -33,8 +33,9 @@ _ACTIVE_STATUSES = ("pending", "confirmed", "used")
 
 
 def _limit_for(settings, service_type: str) -> int:
-    """Per-service limit lookup. New service types added later will need a row here
-    (and the matching column in steam_settings)."""
+    """Per-service GLOBAL limit lookup (no per-day override). Use only when you
+    don't have a Bali date in scope; the booking transaction prefers the
+    override-aware lookup via `steam_day_overrides.effective_limit`."""
     if service_type == "steam":
         return settings.max_bookings_per_guest
     if service_type == "massage":
@@ -59,9 +60,15 @@ def create_bookings(
     and capacity stays untouched. Caller does NOT commit; we commit inside so the
     FOR UPDATE lock actually releases."""
     if not slot_ids:
-        raise HTTPException(status_code=400, detail={"error": "no_slots"})
+        raise HTTPException(status_code=400, detail={
+            "error": "no_slots",
+            "message": "Pick at least one session to continue.",
+        })
     if len(slot_ids) != len(set(slot_ids)):
-        raise HTTPException(status_code=400, detail={"error": "duplicate_slot_ids"})
+        raise HTTPException(status_code=400, detail={
+            "error": "duplicate_slot_ids",
+            "message": "Looks like the same session got selected twice — please refresh and try again.",
+        })
 
     settings = get_or_create_settings(db)
     email_norm = email.strip().lower()
@@ -82,44 +89,77 @@ def create_bookings(
     found = {s.id for s in slots}
     missing = [sid for sid in slot_ids_sorted if sid not in found]
     if missing:
-        raise HTTPException(status_code=404, detail={"error": "slot_not_found", "ids": [str(m) for m in missing]})
+        raise HTTPException(status_code=404, detail={
+            "error": "slot_not_found",
+            "message": "That session is no longer available. Refresh and pick another time.",
+            "ids": [str(m) for m in missing],
+        })
 
     # 2. Validate each slot
     for s in slots:
         if s.status != "open":
-            raise HTTPException(status_code=409, detail={"error": "slot_closed", "slot_id": str(s.id)})
+            raise HTTPException(status_code=409, detail={
+                "error": "slot_closed",
+                "message": "That session has just closed. Please pick another time.",
+                "slot_id": str(s.id),
+            })
         if s.starts_at <= now:
-            raise HTTPException(status_code=409, detail={"error": "slot_past", "slot_id": str(s.id)})
+            raise HTTPException(status_code=409, detail={
+                "error": "slot_past",
+                "message": "That session has already started — please choose a later time today.",
+                "slot_id": str(s.id),
+            })
         if s.booked_count + 1 > s.capacity:
-            raise HTTPException(status_code=409, detail={"error": "slot_full", "slot_id": str(s.id)})
+            raise HTTPException(status_code=409, detail={
+                "error": "slot_full",
+                "message": "Someone just took the last seat in that session — try another time.",
+                "slot_id": str(s.id),
+            })
 
-    # 3. Per-guest limit check — separately per service_type. A guest may book up to
-    #    `max_bookings_per_guest` steam sessions AND `max_massage_bookings_per_guest`
-    #    massages simultaneously; the two limits don't sum into one.
-    #    Postgres rejects COUNT(*) ... FOR UPDATE — we lock rows and count Python-side.
+    # 3. Per-guest limit check — separately per service_type AND per Bali-local day.
+    #    A guest may book up to `max_bookings_per_guest` steam sessions AND
+    #    `max_massage_bookings_per_guest` massages PER DAY. Different days are
+    #    counted independently — booking 2 on Sunday doesn't block booking 2 on
+    #    Monday. Postgres rejects COUNT(*) ... FOR UPDATE — we lock rows + count.
     identity_conditions = [func.lower(SteamBooking.guest_email) == email_norm]
     if device_fingerprint:
         identity_conditions.append(SteamBooking.device_fingerprint == device_fingerprint)
     active_rows = (
-        db.query(SteamBooking.id, SteamBooking.service_type)
+        db.query(SteamBooking.id, SteamBooking.service_type, SteamSlot.starts_at)
+        .join(SteamSlot, SteamSlot.id == SteamBooking.slot_id)
         .filter(
             SteamBooking.status.in_(_ACTIVE_STATUSES),
             or_(*identity_conditions),
         )
-        .with_for_update()
+        .with_for_update(of=SteamBooking)
         .all()
     )
-    existing_by_service: dict[str, int] = {}
-    for _id, svc in active_rows:
-        existing_by_service[svc] = existing_by_service.get(svc, 0) + 1
+    # key = (service_type, bali-local date) → count
+    existing_by_key: dict[tuple[str, date], int] = {}
+    for _id, svc, starts_at in active_rows:
+        bali_day = starts_at.astimezone(BALI_TZ).date()
+        key = (svc, bali_day)
+        existing_by_key[key] = existing_by_key.get(key, 0) + 1
 
-    requested_by_service: dict[str, int] = {}
+    requested_by_key: dict[tuple[str, date], int] = {}
     for s in slots:
-        requested_by_service[s.service_type] = requested_by_service.get(s.service_type, 0) + 1
+        bali_day = s.starts_at.astimezone(BALI_TZ).date()
+        key = (s.service_type, bali_day)
+        requested_by_key[key] = requested_by_key.get(key, 0) + 1
 
-    for svc, requested in requested_by_service.items():
-        existing = existing_by_service.get(svc, 0)
-        limit = _limit_for(settings, svc)
+    # Bulk-load per-day overrides for every day we touch in this transaction
+    # (avoids one query per (svc, day) pair).
+    relevant_days = sorted({day for (_svc, day) in requested_by_key})
+    overrides_by_day = steam_day_overrides.get_many(db, relevant_days)
+
+    for (svc, day), requested in requested_by_key.items():
+        existing = existing_by_key.get((svc, day), 0)
+        limit = steam_day_overrides.effective_limit(
+            overrides_by_day.get(day),
+            svc,
+            default_steam=settings.max_bookings_per_guest,
+            default_massage=settings.max_massage_bookings_per_guest,
+        )
         if existing + requested > limit:
             steam_events.log_event(
                 db,
@@ -127,6 +167,7 @@ def create_bookings(
                 properties={
                     "reason": "limit_exceeded",
                     "service_type": svc,
+                    "day": day.isoformat(),
                     "existing": existing,
                     "requested": requested,
                     "limit": limit,
@@ -136,13 +177,28 @@ def create_bookings(
                 user_agent=user_agent,
             )
             db.commit()
+            svc_label = "steam" if svc == "steam" else "massage"
+            if existing >= limit:
+                human = (
+                    f"You already have {existing} {svc_label} {'session' if existing == 1 else 'sessions'} "
+                    f"booked for today — that's our daily maximum. We'll see you then!"
+                )
+            else:
+                human = (
+                    f"We can host you for up to {limit} {svc_label} "
+                    f"{'session' if limit == 1 else 'sessions'} per day, and you already have "
+                    f"{existing}. Please pick {limit - existing} more or come back tomorrow."
+                )
             raise HTTPException(
                 status_code=409,
                 detail={
                     "error": "limit_exceeded",
+                    "message": human,
                     "service_type": svc,
+                    "day": day.isoformat(),
                     "limit": limit,
                     "existing": existing,
+                    "scope": "per_day",
                 },
             )
 
@@ -257,6 +313,82 @@ def cancel_by_id(
     if not booking:
         raise HTTPException(status_code=404, detail={"error": "not_found"})
     return cancel_by_token(db, booking.cancel_token, actor=actor)
+
+
+def create_walkin(
+    db: Session,
+    *,
+    slot_id: UUID,
+    name: str,
+    email: Optional[str] = None,
+) -> SteamBooking:
+    """Staff books a guest who walked up to the front desk.
+
+    Differs from `create_bookings`:
+      - status is 'confirmed' from the start (no email lifecycle gate even if Resend
+        is configured — staff has the guest right there, no need to email)
+      - email is optional; if missing we synthesise `walkin-{uuid}@local.atmos` so
+        the NOT NULL constraint + unique-ish indexes still hold
+      - capacity still enforced via SELECT FOR UPDATE; no overbook in MVP
+      - per-day guest limit is NOT enforced (staff knows what they're doing — if
+        a regular wants three sessions today, they get three)
+
+    No email is sent for this booking at any stage.
+    """
+    from uuid import uuid4
+
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"error": "name_required"})
+
+    email_norm = (email or "").strip().lower()
+    if not email_norm:
+        email_norm = f"walkin-{uuid4().hex[:12]}@local.atmos"
+
+    now = _now()
+
+    slot = (
+        db.query(SteamSlot)
+        .filter(SteamSlot.id == slot_id)
+        .with_for_update()
+        .first()
+    )
+    if not slot:
+        raise HTTPException(status_code=404, detail={"error": "slot_not_found"})
+    if slot.status != "open":
+        raise HTTPException(status_code=409, detail={"error": "slot_closed"})
+    if slot.booked_count + 1 > slot.capacity:
+        raise HTTPException(status_code=409, detail={"error": "slot_full"})
+
+    booking = SteamBooking(
+        code=gen_unique_code(db),
+        service_type=slot.service_type,
+        slot_id=slot.id,
+        guest_email=email_norm,
+        guest_name=name,
+        device_fingerprint=None,
+        status="confirmed",
+        qr_token=gen_qr_token(),
+        cancel_token=gen_cancel_token(),
+        ip=None,
+        user_agent=None,
+        confirmed_at=now,
+    )
+    db.add(booking)
+    slot.booked_count = slot.booked_count + 1
+
+    db.flush()
+    steam_events.log_event(
+        db,
+        "booking_created",
+        properties={"status": "confirmed", "mode": "walkin"},
+        booking_id=booking.id,
+        slot_id=booking.slot_id,
+    )
+    db.commit()
+    db.refresh(booking)
+    steam_cache.invalidate()
+    return booking
 
 
 def webhook_resend_event(

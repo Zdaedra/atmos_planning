@@ -36,7 +36,7 @@ const EVENT_LABELS: Record<string, string> = {
     qr_scan_rejected: "QR scan ✗ rejected",
 };
 
-const QR_BASE = "https://api.trypranaextract.com/steam/qr";
+const QR_BASE = "https://api.atmos-steam.com/steam/qr";
 
 function confirmAction(title: string, label: string, onConfirm: () => void) {
     toast.warning(title, {
@@ -73,6 +73,9 @@ export function BookingDetailsDrawer({
             queryClient.invalidateQueries({ queryKey: ["steam-bookings-admin"] });
             queryClient.invalidateQueries({ queryKey: ["steam-booking-detail"] });
             queryClient.invalidateQueries({ queryKey: ["steam-slots-admin"] });
+            // Schedule day pane + Reception pane both key on this — without
+            // it the cancelled guest stays visible in the slot card until refresh.
+            queryClient.invalidateQueries({ queryKey: ["steam-day"] });
         },
         onError: (e) => toast.error(apiErrorMessage(e, "Cancel failed")),
     });

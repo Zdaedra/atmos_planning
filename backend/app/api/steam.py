@@ -10,7 +10,7 @@ import csv
 import io
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
@@ -21,8 +21,10 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import require_admin, require_internal
 from app.core.time_utils import BALI_TZ
-from app.models.steam import SteamBooking, SteamEvent, SteamSlot, SteamSlotTemplate, SteamStaff
+from app.models.steam import SteamBooking, SteamEvent, SteamSlot, SteamSlotTemplate
 from app.schemas.steam import (
+    PasswordLoginRequest,
+    PasswordLoginResponse,
     BookingAdminRead,
     BookingByCodeRead,
     BookingCancelRequest,
@@ -31,12 +33,9 @@ from app.schemas.steam import (
     BookingPublicRead,
     BookingResendRequest,
     BookingsCreateResponse,
-    CleanupResult,
+    WalkinCreateRequest,
     ExpireResult,
     MaterializeResult,
-    StaffActivateResponse,
-    StaffAdminRead,
-    StaffCreate,
     StaffVerifyRequest,
     StaffVerifyResponse,
     SteamSettingsRead,
@@ -49,10 +48,12 @@ from app.schemas.steam import (
     SteamSlotTemplatePreviewResponse,
     SteamSlotTemplateRead,
     SteamSlotTemplateUpdate,
+    SteamDayOverrideRead,
+    SteamDayOverrideUpsert,
     SteamSlotUpdate,
 )
 from app.services import steam_bookings as bookings_svc
-from app.services import steam_cache, steam_email, steam_events, steam_qr, steam_rate_limit, steam_staff
+from app.services import steam_cache, steam_day_overrides, steam_email, steam_events, steam_qr, steam_rate_limit, steam_role_auth
 from app.services.steam_materializer import (
     delete_unbooked_future_slots,
     materialize_all_active,
@@ -69,24 +70,48 @@ router = APIRouter()
 # Public
 # ---------------------------------------------------------------------------
 
+@router.get("/settings/public")
+def get_public_settings(db: Session = Depends(get_db)):
+    """Subset of settings safe to expose to the guest UI: branding + per-day limits.
+    `max_steam_per_day` / `max_massage_per_day` reflect *today's* effective limit
+    (i.e., honor a steam_day_overrides row if one exists for today's Bali date).
+    No Resend keys, no internal config. Cached aggressively client-side."""
+    s = get_or_create_settings(db)
+    today = datetime.now(BALI_TZ).date()
+    override = steam_day_overrides.get(db, today)
+    return {
+        "festival_name": s.festival_name,
+        "location_name": s.location_name,
+        "max_steam_per_day": steam_day_overrides.effective_limit(
+            override, "steam",
+            default_steam=s.max_bookings_per_guest,
+            default_massage=s.max_massage_bookings_per_guest,
+        ),
+        "max_massage_per_day": steam_day_overrides.effective_limit(
+            override, "massage",
+            default_steam=s.max_bookings_per_guest,
+            default_massage=s.max_massage_bookings_per_guest,
+        ),
+        "qr_valid_before_slot_minutes": s.qr_valid_before_slot_minutes,
+    }
+
+
 @router.get("/slots", response_model=list[SteamSlotPublicRead])
 def list_slots_public(
     request: Request,
-    from_: Optional[datetime] = Query(default=None, alias="from"),
-    to: Optional[datetime] = Query(default=None),
     service: Optional[str] = Query(default=None, description="steam | massage"),
     db: Session = Depends(get_db),
 ):
-    """Open slots in [from, to). Defaults: from=now, to=now+8 weeks. Closed slots and past
-    slots are excluded. `service=steam` or `?service=massage` filters by type; omit to get
-    both. Result cached in-process for 5s — burst of guest loads collapses onto one DB query."""
+    """Open slots for *today* (Bali wall-clock) only. Future days are intentionally not
+    exposed to guests — bookings are accepted same-day-only as a product decision.
+    Past slots in today are filtered out automatically (starts_at >= now). Result cached
+    in-process for 5s — burst of guest loads collapses onto one DB query."""
     steam_rate_limit.limit_list_slots(request)
 
     now = datetime.now(BALI_TZ)
-    if from_ is None:
-        from_ = now
-    if to is None:
-        to = now + timedelta(weeks=8)
+    today = now.date()
+    from_ = now  # never show slots already started
+    to = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=BALI_TZ)
 
     cache_key = ("slots", from_.isoformat(), to.isoformat(), service or "_all")
     cached = steam_cache.get(cache_key)
@@ -268,9 +293,28 @@ def _resend_email_bg(email: str) -> None:
 # Admin — settings
 # ---------------------------------------------------------------------------
 
+def _settings_to_read(row) -> SteamSettingsRead:
+    """Strip password hashes; surface only the `_set` booleans the admin UI shows."""
+    return SteamSettingsRead(
+        max_bookings_per_guest=row.max_bookings_per_guest,
+        max_massage_bookings_per_guest=row.max_massage_bookings_per_guest,
+        booking_window_minutes=row.booking_window_minutes,
+        qr_valid_before_slot_minutes=row.qr_valid_before_slot_minutes,
+        materialization_horizon_weeks=row.materialization_horizon_weeks,
+        festival_name=row.festival_name,
+        location_name=row.location_name,
+        resend_from_email=row.resend_from_email,
+        resend_reply_to=row.resend_reply_to,
+        public_url=row.public_url,
+        reception_password_set=bool(row.reception_password_hash),
+        scanner_password_set=bool(row.scanner_password_hash),
+        updated_at=row.updated_at,
+    )
+
+
 @router.get("/admin/settings", response_model=SteamSettingsRead)
 def get_settings(_admin=Depends(require_admin), db: Session = Depends(get_db)):
-    return get_or_create_settings(db)
+    return _settings_to_read(get_or_create_settings(db))
 
 
 @router.patch("/admin/settings", response_model=SteamSettingsRead)
@@ -281,11 +325,144 @@ def update_settings(
 ):
     row = get_or_create_settings(db)
     data = payload.model_dump(exclude_unset=True)
+
+    # Password fields are write-only: plaintext in, hash to DB, never echoed back.
+    # Empty string explicitly clears (disables the SPA until a new password is set);
+    # None / missing means "don't touch this column".
+    for plain_field, hash_field in (
+        ("reception_password", "reception_password_hash"),
+        ("scanner_password",   "scanner_password_hash"),
+    ):
+        if plain_field not in data:
+            continue
+        plain = data.pop(plain_field)
+        if plain is None:
+            continue
+        if plain == "":
+            setattr(row, hash_field, None)
+        else:
+            setattr(row, hash_field, steam_role_auth.hash_password(plain))
+
     for k, v in data.items():
         setattr(row, k, v)
     db.commit()
     db.refresh(row)
-    return row
+    return _settings_to_read(row)
+
+
+# ---------------------------------------------------------------------------
+# Tablet password auth — shared password per role (reception, scanner)
+# ---------------------------------------------------------------------------
+
+@router.post("/reception/login", response_model=PasswordLoginResponse)
+def reception_login(payload: PasswordLoginRequest, db: Session = Depends(get_db)):
+    s = get_or_create_settings(db)
+    if not s.reception_password_hash:
+        raise HTTPException(status_code=503, detail={
+            "error": "role_password_not_set",
+            "message": "Reception password isn't configured yet. Ask the manager to set it in admin → Settings.",
+        })
+    expected = s.reception_password_hash
+    given = steam_role_auth.hash_password((payload.password or "").strip())
+    if given != expected:
+        raise HTTPException(status_code=401, detail={
+            "error": "wrong_password",
+            "message": "Wrong password — please try again.",
+        })
+    return PasswordLoginResponse(token=expected)
+
+
+@router.post("/scanner/login", response_model=PasswordLoginResponse)
+def scanner_login(payload: PasswordLoginRequest, db: Session = Depends(get_db)):
+    s = get_or_create_settings(db)
+    if not s.scanner_password_hash:
+        raise HTTPException(status_code=503, detail={
+            "error": "role_password_not_set",
+            "message": "Scanner password isn't configured yet. Ask the manager to set it in admin → Settings.",
+        })
+    expected = s.scanner_password_hash
+    given = steam_role_auth.hash_password((payload.password or "").strip())
+    if given != expected:
+        raise HTTPException(status_code=401, detail={
+            "error": "wrong_password",
+            "message": "Wrong password — please try again.",
+        })
+    return PasswordLoginResponse(token=expected)
+
+
+# ---------------------------------------------------------------------------
+# Admin — per-day overrides of per-guest booking limit
+# ---------------------------------------------------------------------------
+
+def _parse_iso_day(value: str) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"error": "bad_date", "expected": "YYYY-MM-DD"})
+
+
+@router.get("/admin/day-overrides/{date_str}")
+def admin_get_day_override(
+    date_str: str,
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Returns the override row for that Bali date, or 200 with nulls if absent.
+    Frontend uses the absent shape to render "(default)" placeholders."""
+    day = _parse_iso_day(date_str)
+    row = steam_day_overrides.get(db, day)
+    settings = get_or_create_settings(db)
+    return {
+        "day": day.isoformat(),
+        "max_steam_per_guest": (row.max_steam_per_guest if row else None),
+        "max_massage_per_guest": (row.max_massage_per_guest if row else None),
+        "note": (row.note if row else None),
+        "defaults": {
+            "max_steam_per_guest": settings.max_bookings_per_guest,
+            "max_massage_per_guest": settings.max_massage_bookings_per_guest,
+        },
+    }
+
+
+@router.put("/admin/day-overrides/{date_str}")
+def admin_upsert_day_override(
+    date_str: str,
+    payload: SteamDayOverrideUpsert,
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    day = _parse_iso_day(date_str)
+    steam_day_overrides.upsert(
+        db, day,
+        max_steam_per_guest=payload.max_steam_per_guest,
+        max_massage_per_guest=payload.max_massage_per_guest,
+        note=payload.note,
+    )
+    steam_events.log_event(
+        db,
+        "day_override_set",
+        properties={
+            "day": day.isoformat(),
+            "max_steam_per_guest": payload.max_steam_per_guest,
+            "max_massage_per_guest": payload.max_massage_per_guest,
+        },
+    )
+    db.commit()
+    return admin_get_day_override(date_str, _admin=None, db=db)  # type: ignore[arg-type]
+
+
+@router.delete("/admin/day-overrides/{date_str}", status_code=204)
+def admin_delete_day_override(
+    date_str: str,
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    day = _parse_iso_day(date_str)
+    removed = steam_day_overrides.delete(db, day)
+    if removed:
+        steam_events.log_event(db, "day_override_cleared", properties={"day": day.isoformat()})
+    db.commit()
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
@@ -637,124 +814,86 @@ def internal_expire_bookings(
     return ExpireResult(**result)
 
 
-@router.post("/internal/cleanup-sessions", response_model=CleanupResult)
-def internal_cleanup_sessions(
-    _ok: bool = Depends(require_internal),
-    db: Session = Depends(get_db),
-):
-    """Hourly tick: clear expired staff session tokens."""
-    return CleanupResult(**steam_staff.cleanup_expired_sessions(db))
-
-
 # ---------------------------------------------------------------------------
-# Staff — magic-link activation + QR verify
+# Door scanner — QR verify (shared-password auth, see steam_role_auth)
 # ---------------------------------------------------------------------------
-
-def _staff_to_admin_read(row: SteamStaff, *, include_activation: bool = False, settings=None) -> StaffAdminRead:
-    activation_url = None
-    if include_activation and row.activation_token and settings and settings.public_url:
-        activation_url = f"{settings.public_url.rstrip('/')}/staff/activate/{row.activation_token}"
-    return StaffAdminRead(
-        id=row.id,
-        name=row.name,
-        status=row.status,
-        has_active_session=bool(row.session_token and row.session_expires_at and row.session_expires_at > datetime.now(BALI_TZ)),
-        last_seen_at=row.last_seen_at,
-        activation_token=row.activation_token if include_activation else None,
-        activation_url=activation_url,
-        created_at=row.created_at,
-    )
-
-
-@router.get("/staff/activate/{activation_token}", response_model=StaffActivateResponse)
-def staff_activate(activation_token: str, db: Session = Depends(get_db)):
-    """Magic-link landing. Single-use: token is consumed, a 24h session_token is
-    issued. Host's phone is expected to stash session_token in localStorage and
-    send it back as `X-Staff-Token` on /staff/verify."""
-    row = steam_staff.activate(db, activation_token)
-    steam_events.log_event(
-        db,
-        "staff_link_activated",
-        properties={"staff_name": row.name},
-        staff_id=row.id,
-    )
-    db.commit()
-    return StaffActivateResponse(
-        id=row.id,
-        name=row.name,
-        session_token=row.session_token,
-        session_expires_at=row.session_expires_at,
-    )
-
 
 @router.post("/staff/verify", response_model=StaffVerifyResponse)
 def staff_verify(
     payload: StaffVerifyRequest,
-    staff=Depends(steam_staff.require_staff),
+    _=Depends(steam_role_auth.require_scanner_password),
     db: Session = Depends(get_db),
 ):
-    result = bookings_svc.verify_qr(db, payload.qr_token, staff_id=staff.id)
+    # Shared-password auth — no per-staff id, so verify_qr logs the scan with
+    # no staff_id attribution. If per-staff audit ever matters again, swap back
+    # to require_staff and a magic-link issued per device.
+    result = bookings_svc.verify_qr(db, payload.qr_token, staff_id=None)
     return StaffVerifyResponse(**result)
 
 
 # ---------------------------------------------------------------------------
-# Admin — staff CRUD
+# Reception portal — gated by the shared-password dep in steam_role_auth. Lives
+# on its own
+# subdomain (reception.atmos-steam.com) so the front-of-house staff never see
+# the full admin SPA.
 # ---------------------------------------------------------------------------
 
-@router.get("/admin/staff", response_model=list[StaffAdminRead])
-def admin_list_staff(_admin=Depends(require_admin), db: Session = Depends(get_db)):
-    rows = db.query(SteamStaff).order_by(SteamStaff.created_at.desc()).all()
-    return [_staff_to_admin_read(r) for r in rows]
+@router.get("/reception/settings")
+def reception_settings(_=Depends(steam_role_auth.require_reception_password), db: Session = Depends(get_db)):
+    """Subset of settings the reception SPA shows in its header."""
+    s = get_or_create_settings(db)
+    return {
+        "festival_name": s.festival_name,
+        "location_name": s.location_name,
+        "qr_valid_before_slot_minutes": s.qr_valid_before_slot_minutes,
+    }
 
 
-@router.post("/admin/staff", response_model=StaffAdminRead, status_code=201)
-def admin_create_staff(
-    payload: StaffCreate,
-    _admin=Depends(require_admin),
+@router.get("/reception/day")
+def reception_day(
+    date: Optional[str] = Query(default=None),
+    service: Optional[str] = Query(default=None),
+    _=Depends(steam_role_auth.require_reception_password),
     db: Session = Depends(get_db),
 ):
-    row = steam_staff.create_staff(db, name=payload.name)
-    settings = get_or_create_settings(db)
-    steam_events.log_event(
-        db,
-        "staff_created",
-        properties={"staff_name": row.name},
-        staff_id=row.id,
+    """Same shape as /admin/day; reception accounts call this from their portal."""
+    return admin_day_view(date=date, service=service, _admin=None, db=db)  # type: ignore[arg-type]
+
+
+@router.post("/reception/walkin", response_model=BookingAdminRead, status_code=201)
+def reception_walkin(
+    payload: WalkinCreateRequest,
+    _=Depends(steam_role_auth.require_reception_password),
+    db: Session = Depends(get_db),
+):
+    booking = bookings_svc.create_walkin(
+        db, slot_id=payload.slot_id, name=payload.name, email=payload.email,
     )
-    db.commit()
-    db.refresh(row)
-    return _staff_to_admin_read(row, include_activation=True, settings=settings)
-
-
-@router.post("/admin/staff/{staff_id}/reissue", response_model=StaffAdminRead)
-def admin_reissue_staff(
-    staff_id: UUID,
-    _admin=Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    row = steam_staff.reissue_activation(db, staff_id)
-    settings = get_or_create_settings(db)
-    db.commit()
-    db.refresh(row)
-    return _staff_to_admin_read(row, include_activation=True, settings=settings)
-
-
-@router.delete("/admin/staff/{staff_id}", response_model=StaffAdminRead)
-def admin_deactivate_staff(
-    staff_id: UUID,
-    _admin=Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    row = steam_staff.deactivate(db, staff_id)
-    steam_events.log_event(
-        db,
-        "staff_deactivated",
-        properties={"staff_name": row.name},
-        staff_id=row.id,
+    slot = db.query(SteamSlot).filter(SteamSlot.id == booking.slot_id).first()
+    return BookingAdminRead(
+        id=booking.id, code=booking.code, service_type=booking.service_type,
+        slot_id=booking.slot_id,
+        slot_starts_at=slot.starts_at if slot else None,
+        guest_email=booking.guest_email, guest_name=booking.guest_name,
+        device_fingerprint=None, status=booking.status,
+        qr_token=booking.qr_token, cancel_token=booking.cancel_token,
+        ip=None, user_agent=None,
+        created_at=booking.created_at, confirmed_at=booking.confirmed_at,
+        cancelled_at=None, entered_at=None,
     )
-    db.commit()
-    db.refresh(row)
-    return _staff_to_admin_read(row)
+
+
+@router.post("/reception/bookings/{booking_id}/cancel", response_model=BookingCancelResponse)
+def reception_cancel_booking(
+    booking_id: UUID,
+    _=Depends(steam_role_auth.require_reception_password),
+    db: Session = Depends(get_db),
+):
+    booking = bookings_svc.cancel_by_id(db, booking_id, actor="admin")  # event log = admin (close enough)
+    return BookingCancelResponse(
+        id=booking.id, code=booking.code, status=booking.status,
+        cancelled_at=booking.cancelled_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -929,6 +1068,132 @@ def admin_booking_detail(
     }
 
 
+@router.get("/admin/day")
+def admin_day_view(
+    date: Optional[str] = Query(default=None, description="YYYY-MM-DD in Bali tz; default = today"),
+    service: Optional[str] = Query(default=None, description="steam | massage"),
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Operational dashboard for a single day: every slot + the bookings on it,
+    fetched in two queries (slots + bookings WHERE slot_id IN (...)) to avoid N+1.
+
+    Used by /steam/today in the admin UI. The shape is intentionally denormalized
+    so the page doesn't have to glue two endpoints.
+    """
+    # Parse date as Bali wall-clock day; fall back to today.
+    try:
+        if date:
+            day = datetime.strptime(date, "%Y-%m-%d").date()
+        else:
+            day = datetime.now(BALI_TZ).date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"error": "bad_date", "expected": "YYYY-MM-DD"})
+
+    day_start = datetime.combine(day, datetime.min.time(), tzinfo=BALI_TZ)
+    day_end = day_start + timedelta(days=1)
+
+    slot_q = (
+        db.query(SteamSlot)
+        .filter(SteamSlot.starts_at >= day_start, SteamSlot.starts_at < day_end)
+    )
+    if service:
+        slot_q = slot_q.filter(SteamSlot.service_type == service)
+    slots = slot_q.order_by(SteamSlot.starts_at.asc()).all()
+
+    # Single bookings query for all slot ids of this day.
+    slot_ids = [s.id for s in slots]
+    bookings_by_slot: dict = {sid: [] for sid in slot_ids}
+    if slot_ids:
+        bookings = (
+            db.query(SteamBooking)
+            .filter(SteamBooking.slot_id.in_(slot_ids))
+            .order_by(SteamBooking.created_at.asc())
+            .all()
+        )
+        for b in bookings:
+            bookings_by_slot[b.slot_id].append(b)
+
+    # Build response — slot card with nested guests.
+    # `bookings` only includes ACTIVE bookings (pending/confirmed/used). Cancelled
+    # and expired ones live in the bookings ledger for history but should never
+    # render in the day-pane card — otherwise managers see "ghost" rows after
+    # cancelling a guest while the slot counter shows the correct decremented
+    # count, which is exactly what looks like a bug to them.
+    def serialize_slot(s: SteamSlot) -> dict:
+        bs = bookings_by_slot.get(s.id, [])
+        active = [b for b in bs if b.status in ("pending", "confirmed", "used")]
+        return {
+            "id": str(s.id),
+            "service_type": s.service_type,
+            "starts_at": s.starts_at.isoformat(),
+            "ends_at": s.ends_at.isoformat(),
+            "capacity": s.capacity,
+            "booked_count": s.booked_count,
+            "status": s.status,
+            "is_override": s.is_override,
+            "template_id": str(s.template_id) if s.template_id else None,
+            "therapist": s.therapist,
+            "room": s.room,
+            "variant": s.variant,
+            "bookings": [
+                {
+                    "id": str(b.id),
+                    "code": b.code,
+                    "status": b.status,
+                    "guest_email": b.guest_email,
+                    "guest_name": b.guest_name,
+                    "qr_token": str(b.qr_token),
+                    "created_at": b.created_at.isoformat() if b.created_at else None,
+                    "entered_at": b.entered_at.isoformat() if b.entered_at else None,
+                }
+                for b in active
+            ],
+            "active_count": len(active),
+        }
+
+    # Aggregate stats
+    by_service: dict = {"steam": {"slots": 0, "active_bookings": 0}, "massage": {"slots": 0, "active_bookings": 0}}
+    for s in slots:
+        if s.service_type in by_service:
+            by_service[s.service_type]["slots"] += 1
+            by_service[s.service_type]["active_bookings"] += sum(
+                1 for b in bookings_by_slot.get(s.id, []) if b.status in ("pending", "confirmed", "used")
+            )
+
+    # Effective per-guest limits for this day (override > global default).
+    settings = get_or_create_settings(db)
+    override = steam_day_overrides.get(db, day)
+    limits = {
+        "steam": {
+            "effective": steam_day_overrides.effective_limit(
+                override, "steam",
+                default_steam=settings.max_bookings_per_guest,
+                default_massage=settings.max_massage_bookings_per_guest,
+            ),
+            "default": settings.max_bookings_per_guest,
+            "override": override.max_steam_per_guest if override else None,
+        },
+        "massage": {
+            "effective": steam_day_overrides.effective_limit(
+                override, "massage",
+                default_steam=settings.max_bookings_per_guest,
+                default_massage=settings.max_massage_bookings_per_guest,
+            ),
+            "default": settings.max_massage_bookings_per_guest,
+            "override": override.max_massage_per_guest if override else None,
+        },
+        "note": override.note if override else None,
+    }
+
+    return {
+        "date": day.isoformat(),
+        "stats": by_service,
+        "slots": [serialize_slot(s) for s in slots],
+        "limits": limits,
+    }
+
+
 @router.get("/admin/cron-status")
 def admin_cron_status(
     _admin=Depends(require_admin),
@@ -955,6 +1220,39 @@ def admin_cron_status(
         "materialize": _latest("materialization_run"),
         "expire": _latest("expire_run"),
     }
+
+
+@router.post("/admin/walkin", response_model=BookingAdminRead, status_code=201)
+def admin_create_walkin(
+    payload: WalkinCreateRequest,
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Staff books a walk-in guest into a slot. Skips email lifecycle entirely —
+    booking is created `confirmed`. See `bookings_svc.create_walkin` for details."""
+    booking = bookings_svc.create_walkin(
+        db, slot_id=payload.slot_id, name=payload.name, email=payload.email,
+    )
+    slot = db.query(SteamSlot).filter(SteamSlot.id == booking.slot_id).first()
+    return BookingAdminRead(
+        id=booking.id,
+        code=booking.code,
+        service_type=booking.service_type,
+        slot_id=booking.slot_id,
+        slot_starts_at=slot.starts_at if slot else None,
+        guest_email=booking.guest_email,
+        guest_name=booking.guest_name,
+        device_fingerprint=None,
+        status=booking.status,
+        qr_token=booking.qr_token,
+        cancel_token=booking.cancel_token,
+        ip=None,
+        user_agent=None,
+        created_at=booking.created_at,
+        confirmed_at=booking.confirmed_at,
+        cancelled_at=None,
+        entered_at=None,
+    )
 
 
 @router.post("/admin/bookings/{booking_id}/cancel", response_model=BookingCancelResponse)

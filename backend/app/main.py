@@ -73,6 +73,25 @@ _MIGRATIONS = [
     "ALTER TABLE steam_bookings DROP CONSTRAINT IF EXISTS steam_bookings_service_chk",
     "ALTER TABLE steam_bookings ADD CONSTRAINT steam_bookings_service_chk CHECK (service_type IN ('steam','massage'))",
     "CREATE INDEX IF NOT EXISTS ix_steam_bookings_service_status ON steam_bookings (service_type, status)",
+    # Reception portal: door scanner vs reception role separation on steam_staff
+    "ALTER TABLE steam_staff ADD COLUMN IF NOT EXISTS role VARCHAR NOT NULL DEFAULT 'door_scanner'",
+    "ALTER TABLE steam_staff DROP CONSTRAINT IF EXISTS steam_staff_role_chk",
+    "ALTER TABLE steam_staff ADD CONSTRAINT steam_staff_role_chk CHECK (role IN ('door_scanner','reception'))",
+    # Per-date per-guest booking-limit override. Row absent = global default applies;
+    # column NULL = use global for that service on that day.
+    """CREATE TABLE IF NOT EXISTS steam_day_overrides (
+        day DATE PRIMARY KEY,
+        max_steam_per_guest INTEGER,
+        max_massage_per_guest INTEGER,
+        note VARCHAR,
+        created_at TIMESTAMPTZ DEFAULT now(),
+        updated_at TIMESTAMPTZ DEFAULT now()
+    )""",
+    # Shared-password tablet auth (replaces per-staff magic links for reception +
+    # door scanner). Stored as sha256(password + per-deploy salt). NULL = role-SPA
+    # disabled until admin sets a password in Settings.
+    "ALTER TABLE steam_settings ADD COLUMN IF NOT EXISTS reception_password_hash VARCHAR",
+    "ALTER TABLE steam_settings ADD COLUMN IF NOT EXISTS scanner_password_hash VARCHAR",
 ]
 
 with engine.begin() as conn:
@@ -96,7 +115,14 @@ try:
 except Exception as e:
     print(f"[steam] seed failed: {e}", flush=True)
 
-_default_origins = "https://admin.trypranaextract.com,https://app.trypranaextract.com"
+_default_origins = (
+    "https://admin.trypranaextract.com,"
+    "https://app.trypranaextract.com,"
+    "https://book.atmos-steam.com,"       # guest UI
+    "https://reception.atmos-steam.com,"  # reception portal (separate SPA)
+    "https://admin.atmos-steam.com,"      # reserved for future admin domain on atmos-steam.com
+    "https://app.atmos-steam.com"         # reserved likewise
+)
 _allow_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", _default_origins).split(",") if o.strip()]
 
 app.add_middleware(

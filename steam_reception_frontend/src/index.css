@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: #faf7f1;
+  color: #0e0e0e;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-feature-settings: "ss01", "cv11";
+}
+
+/* Subtle paper-grain texture on the cream background — only on lighter areas,
+   gives the page a wood/sand feel without overwhelming. */
+.grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.4;
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(20, 16, 10, 0.06) 1px, transparent 0);
+  background-size: 4px 4px;
+}
+
+.font-display { font-family: "Cormorant Garamond", Georgia, serif; }

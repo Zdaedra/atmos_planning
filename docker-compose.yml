@@ -77,6 +77,31 @@ services:
       - backend
     restart: unless-stopped
 
+  steam_guest:
+    build: ./steam_guest_frontend
+    container_name: atmos_steam_guest
+    environment:
+      TZ: "Asia/Makassar"
+    ports:
+      - "4004:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Reception portal — isolated SPA served on reception.atmos-steam.com.
+  # Separate from steam_guest so receptionists never see the guest UI and
+  # vice versa; locked down by `role: reception` on the staff session.
+  steam_reception:
+    build: ./steam_reception_frontend
+    container_name: atmos_steam_reception
+    environment:
+      TZ: "Asia/Makassar"
+    ports:
+      - "4005:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
   button_bot:
     build: ./button_bot
     container_name: atmos_button_bot

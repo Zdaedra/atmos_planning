@@ -14,10 +14,10 @@ const navItems = [
 ];
 
 const steamItems = [
-  { label: "Schedule", path: "/steam/schedule" },
-  { label: "Bookings", path: "/steam/bookings" },
-  { label: "Staff",    path: "/steam/staff" },
-  { label: "Settings", path: "/steam/settings" },
+  { label: "Reception", path: "/steam/reception" },  // operational staff portal
+  { label: "Schedule",  path: "/steam/schedule" },
+  { label: "Bookings",  path: "/steam/bookings" },
+  { label: "Settings",  path: "/steam/settings" },
 ];
 
 export function AppSidebar() {
@@ -65,7 +65,7 @@ export function AppSidebar() {
           )}
         >
           <Flame className="w-5 h-5" strokeWidth={2} />
-          <span className="flex-1">Steam</span>
+          <span className="flex-1">Events</span>
           <ChevronRight className={cn("w-4 h-4 transition-transform", steamOpen && "rotate-90")} />
         </button>
 

@@ -24,8 +24,12 @@ class SteamSettings(Base):
     )
 
     id = Column(Integer, primary_key=True, default=1)
-    # max_bookings_per_guest = limit for service_type='steam' (legacy column name)
+    # max_bookings_per_guest = per-day cap for service_type='steam' (legacy column name).
+    # Counts active steam bookings on the same Bali-local day; different days are
+    # independent. Semantics changed from "total active" to "per-day" — column kept
+    # for migration simplicity.
     max_bookings_per_guest = Column(Integer, nullable=False, default=2)
+    # Same per-day semantics, just for service_type='massage'.
     max_massage_bookings_per_guest = Column(Integer, nullable=False, default=5)
     booking_window_minutes = Column(Integer, nullable=False, default=20)
     qr_valid_before_slot_minutes = Column(Integer, nullable=False, default=10)
@@ -35,6 +39,11 @@ class SteamSettings(Base):
     resend_from_email = Column(String, nullable=True)
     resend_reply_to = Column(String, nullable=True)
     public_url = Column(String, nullable=True)
+    # Shared-password auth for the tablet SPAs (reception, door scanner). Each is a
+    # sha256 hash of (plaintext + per-deploy salt). NULL = role-SPA disabled until
+    # admin sets a password.
+    reception_password_hash = Column(String, nullable=True)
+    scanner_password_hash = Column(String, nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
@@ -164,6 +173,12 @@ class SteamStaff(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     name = Column(String, nullable=False)
+    # Two distinct portals share this table:
+    #   door_scanner — phone scanner at the entrance, /staff/verify only
+    #   reception    — front-desk operator, /reception/* only
+    # Tokens, sessions, magic-link lifecycle are identical; only authorisation
+    # diverges via require_door_staff / require_reception dependencies.
+    role = Column(String, nullable=False, default="door_scanner")
     activation_token = Column(String, nullable=True, unique=True)
     session_token = Column(String, nullable=True, unique=True)
     session_expires_at = Column(DateTime(timezone=True), nullable=True)
@@ -174,9 +189,28 @@ class SteamStaff(Base):
 
     __table_args__ = (
         CheckConstraint("status IN ('active','inactive')", name="steam_staff_status_chk"),
+        CheckConstraint("role IN ('door_scanner','reception')", name="steam_staff_role_chk"),
         Index("ix_steam_staff_activation_token", "activation_token"),
         Index("ix_steam_staff_session_token", "session_token"),
     )
+
+
+class SteamDayOverride(Base):
+    """Per-date override of the per-guest booking limit (steam and/or massage).
+    NULL on either column means "use the global default from steam_settings".
+    Row absent altogether = no override at all for that day.
+
+    Stored as Bali-local DATE — every place that consults this MUST first project
+    the slot's `starts_at` into Asia/Makassar before lookup.
+    """
+    __tablename__ = "steam_day_overrides"
+
+    day = Column(Date, primary_key=True)
+    max_steam_per_guest = Column(Integer, nullable=True)
+    max_massage_per_guest = Column(Integer, nullable=True)
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class SteamEvent(Base):

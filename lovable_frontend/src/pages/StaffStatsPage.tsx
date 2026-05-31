@@ -78,7 +78,7 @@ export default function StaffStatsPage() {
         queryKey: ['personnelStats', timeframe],
         queryFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`https://api.trypranaextract.com/stats/personnel?timeframe=${timeframe}`, {
+            const res = await fetch(`https://api.atmos-steam.com/stats/personnel?timeframe=${timeframe}`, {
                 cache: "no-store",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -91,7 +91,7 @@ export default function StaffStatsPage() {
         queryKey: ['supervisorStats', selectedUserId, timeframe],
         queryFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`https://api.trypranaextract.com/stats/personnel/${selectedUserId}?timeframe=${timeframe}`, {
+            const res = await fetch(`https://api.atmos-steam.com/stats/personnel/${selectedUserId}?timeframe=${timeframe}`, {
                 cache: "no-store",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -104,7 +104,7 @@ export default function StaffStatsPage() {
     const { data: templates = [] } = useQuery({
         queryKey: ['templates'],
         queryFn: async () => {
-            const res = await fetch(`https://api.trypranaextract.com/tasks/templates`, {
+            const res = await fetch(`https://api.atmos-steam.com/tasks/templates`, {
                 cache: "no-store"
             });
             return res.json();
@@ -129,7 +129,7 @@ export default function StaffStatsPage() {
             if (!selectedUserId) return {};
             const startD = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toISOString().split('T')[0];
             const endD = new Date(new Date().getFullYear(), new Date().getMonth() + 2, 0).toISOString().split('T')[0];
-            const res = await fetch(`https://api.trypranaextract.com/tasks/calendar?start_date=${startD}&end_date=${endD}&user_id=${selectedUserId}`);
+            const res = await fetch(`https://api.atmos-steam.com/tasks/calendar?start_date=${startD}&end_date=${endD}&user_id=${selectedUserId}`);
             if (!res.ok) return {};
             return res.json();
         },
@@ -185,7 +185,7 @@ export default function StaffStatsPage() {
     const sendMsgMutation = useMutation({
         mutationFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`https://api.trypranaextract.com/messages/`, {
+            const res = await fetch(`https://api.atmos-steam.com/messages/`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                 body: JSON.stringify({ user_id: selectedUserId, text: msgText })
@@ -203,7 +203,7 @@ export default function StaffStatsPage() {
     const assignTaskMutation = useMutation({
         mutationFn: async (params: { assignAll: boolean, assignDate: string | null }) => {
             const token = localStorage.getItem("access_token");
-            const promises = assignTpls.map(tplId => fetch(`https://api.trypranaextract.com/tasks/assign`, {
+            const promises = assignTpls.map(tplId => fetch(`https://api.atmos-steam.com/tasks/assign`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                 body: JSON.stringify({
@@ -234,7 +234,7 @@ export default function StaffStatsPage() {
     const unassignTaskMutation = useMutation({
         mutationFn: async (params: { unassignAll: boolean, unassignDate: string | null }) => {
             const token = localStorage.getItem("access_token");
-            const promises = assignTpls.map(tplId => fetch(`https://api.trypranaextract.com/tasks/unassign`, {
+            const promises = assignTpls.map(tplId => fetch(`https://api.atmos-steam.com/tasks/unassign`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                 body: JSON.stringify({
@@ -262,7 +262,7 @@ export default function StaffStatsPage() {
 
     const addUserMutation = useMutation({
         mutationFn: async () => {
-            const res = await fetch(`https://api.trypranaextract.com/auth/register`, {
+            const res = await fetch(`https://api.atmos-steam.com/auth/register`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -293,7 +293,7 @@ export default function StaffStatsPage() {
     const archiveUserMutation = useMutation({
         mutationFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`https://api.trypranaextract.com/auth/users/${selectedUserId}/archive`, {
+            const res = await fetch(`https://api.atmos-steam.com/auth/users/${selectedUserId}/archive`, {
                 method: "PATCH",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -311,7 +311,7 @@ export default function StaffStatsPage() {
     const resetDeviceMutation = useMutation({
         mutationFn: async () => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`https://api.trypranaextract.com/auth/users/${selectedUserId}/reset-device`, {
+            const res = await fetch(`https://api.atmos-steam.com/auth/users/${selectedUserId}/reset-device`, {
                 method: "PATCH",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -329,7 +329,7 @@ export default function StaffStatsPage() {
     const updateSupervisorConfigMutation = useMutation({
         mutationFn: async ({ id, data }: { id: number, data: any }) => {
             const token = localStorage.getItem("access_token");
-            const res = await fetch(`https://api.trypranaextract.com/supervisors/${id}`, {
+            const res = await fetch(`https://api.atmos-steam.com/supervisors/${id}`, {
                 method: "PUT",
                 headers: {
                     "Content-Type": "application/json",
@@ -1261,7 +1261,7 @@ export default function StaffStatsPage() {
                                     if (!confirm("Сгенерировать новый пароль для пользователя? Старый перестанет работать.")) return;
                                     try {
                                         const token = localStorage.getItem("access_token");
-                                        const res = await fetch(`https://api.trypranaextract.com/supervisors/${credentialsUser.id}/reset-password`, {
+                                        const res = await fetch(`https://api.atmos-steam.com/supervisors/${credentialsUser.id}/reset-password`, {
                                             method: "POST",
                                             headers: { "Authorization": `Bearer ${token}` },
                                         });

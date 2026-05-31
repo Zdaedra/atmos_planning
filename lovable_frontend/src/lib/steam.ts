@@ -9,7 +9,7 @@
  */
 import { getAuthToken } from "./api";
 
-const API_URL = "https://api.trypranaextract.com";
+const API_URL = "https://api.atmos-steam.com";
 
 /**
  * Pull a human-readable message out of whatever shape FastAPI returned.
@@ -83,7 +83,16 @@ export interface SteamSettings {
     resend_from_email: string | null;
     resend_reply_to: string | null;
     public_url: string | null;
+    // Booleans surfaced by the API; hashes themselves are never sent to the client.
+    reception_password_set: boolean;
+    scanner_password_set: boolean;
     updated_at: string;
+}
+
+// Plaintext password write-only fields — only sent on PATCH, never echoed back.
+export interface SteamSettingsUpdatePayload extends Partial<SteamSettings> {
+    reception_password?: string | null;  // "" clears; null leaves unchanged
+    scanner_password?: string | null;
 }
 
 export interface SlotTemplate {
@@ -139,17 +148,6 @@ export interface BookingRow {
     confirmed_at: string | null;
     cancelled_at: string | null;
     entered_at: string | null;
-}
-
-export interface StaffRow {
-    id: string;
-    name: string;
-    status: "active" | "inactive";
-    has_active_session: boolean;
-    last_seen_at: string | null;
-    activation_token: string | null;
-    activation_url: string | null;
-    created_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +311,102 @@ export interface CronStatus {
 
 export const fetchCronStatus = () => req<CronStatus>("/steam/admin/cron-status");
 
+// ---------------------------------------------------------------------------
+// Today / day view
+// ---------------------------------------------------------------------------
+
+export interface DayBooking {
+    id: string;
+    code: string;
+    status: BookingStatus;
+    guest_email: string;
+    guest_name: string | null;
+    qr_token: string;
+    created_at: string | null;
+    entered_at: string | null;
+}
+
+export interface DaySlot {
+    id: string;
+    service_type: ServiceType;
+    starts_at: string;
+    ends_at: string;
+    capacity: number;
+    booked_count: number;
+    status: SlotStatus;
+    is_override: boolean;
+    template_id: string | null;
+    therapist: string | null;
+    room: string | null;
+    variant: string | null;
+    bookings: DayBooking[];
+    active_count: number;
+}
+
+export interface DayLimitInfo {
+    effective: number;
+    default: number;
+    override: number | null;  // null = no override; falls back to default
+}
+
+export interface DayLimits {
+    steam: DayLimitInfo;
+    massage: DayLimitInfo;
+    note: string | null;
+}
+
+export interface DayView {
+    date: string;
+    stats: {
+        steam: { slots: number; active_bookings: number };
+        massage: { slots: number; active_bookings: number };
+    };
+    slots: DaySlot[];
+    limits: DayLimits;
+}
+
+// Per-day per-guest booking limit override.
+export interface DayOverride {
+    day: string;
+    max_steam_per_guest: number | null;
+    max_massage_per_guest: number | null;
+    note: string | null;
+    defaults: {
+        max_steam_per_guest: number;
+        max_massage_per_guest: number;
+    };
+}
+
+export const fetchDayOverride = (date: string) =>
+    req<DayOverride>(`/steam/admin/day-overrides/${date}`);
+
+export const upsertDayOverride = (date: string, body: {
+    max_steam_per_guest?: number | null;
+    max_massage_per_guest?: number | null;
+    note?: string | null;
+}) =>
+    req<DayOverride>(`/steam/admin/day-overrides/${date}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+    });
+
+export const deleteDayOverride = (date: string) =>
+    req<void>(`/steam/admin/day-overrides/${date}`, { method: "DELETE" });
+
+export const createWalkin = (slot_id: string, name: string, email?: string) =>
+    req<BookingRow>("/steam/admin/walkin", {
+        method: "POST",
+        body: JSON.stringify({ slot_id, name, email: email || undefined }),
+    });
+
+export const fetchDay = (date?: string, service?: ServiceType) => {
+    const params = new URLSearchParams();
+    if (date) params.set("date", date);
+    if (service) params.set("service", service);
+    const qs = params.toString();
+    return req<DayView>(`/steam/admin/day${qs ? "?" + qs : ""}`);
+};
+
 export const exportBookingsCsvUrl = (q: BookingsQuery = {}) => {
     const params = new URLSearchParams();
     params.set("export", "csv");
@@ -342,17 +436,6 @@ export async function downloadBookingsCsv(q: BookingsQuery = {}) {
     URL.revokeObjectURL(url);
 }
 
-// ---------------------------------------------------------------------------
-// Staff
-// ---------------------------------------------------------------------------
-
-export const fetchStaff = () => req<StaffRow[]>("/steam/admin/staff");
-
-export const createStaff = (name: string) =>
-    req<StaffRow>("/steam/admin/staff", { method: "POST", body: JSON.stringify({ name }) });
-
-export const reissueStaff = (id: string) =>
-    req<StaffRow>(`/steam/admin/staff/${id}/reissue`, { method: "POST" });
-
-export const deactivateStaff = (id: string) =>
-    req<StaffRow>(`/steam/admin/staff/${id}`, { method: "DELETE" });
+// Staff (magic-link) helpers removed — tablet auth is now shared-password.
+// See settings: reception_password_set / scanner_password_set + the /login
+// endpoints on /reception and /scanner.

@@ -23,7 +23,7 @@ export default function Login() {
         setLoading(true);
 
         try {
-            const response = await fetch("https://api.trypranaextract.com/auth/login", {
+            const response = await fetch("https://api.atmos-steam.com/auth/login", {
                 method: "POST",
                 headers: { "Content-Type": "application/x-www-form-urlencoded" },
                 body: new URLSearchParams({ username: email, password: password }),

@@ -126,7 +126,7 @@ export default function TaskFormModal({ trigger, task }: { trigger: React.ReactN
                 supply_days_before: isService && cleanSupply.length && !Number.isNaN(supplyDaysNum) ? supplyDaysNum : null,
             };
 
-            const url = task ? `https://api.trypranaextract.com/tasks/templates/${task.id}` : "https://api.trypranaextract.com/tasks/templates/";
+            const url = task ? `https://api.atmos-steam.com/tasks/templates/${task.id}` : "https://api.atmos-steam.com/tasks/templates/";
             const method = task ? "PUT" : "POST";
 
             const res = await fetch(url, {
@@ -303,7 +303,7 @@ export default function TaskFormModal({ trigger, task }: { trigger: React.ReactN
                             <Button variant="destructive" className="flex-1" onClick={async () => {
                                 if (confirm("Are you sure?")) {
                                     try {
-                                        const res = await fetch(`https://api.trypranaextract.com/tasks/templates/${task.id}`, {
+                                        const res = await fetch(`https://api.atmos-steam.com/tasks/templates/${task.id}`, {
                                             method: "DELETE",
                                             headers: { "Authorization": `Bearer ${localStorage.getItem('access_token')}` }
                                         });

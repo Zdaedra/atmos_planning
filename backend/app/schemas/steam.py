@@ -23,6 +23,10 @@ class SteamSettingsRead(BaseModel):
     resend_from_email: Optional[str] = None
     resend_reply_to: Optional[str] = None
     public_url: Optional[str] = None
+    # Surfaced as booleans, never the hashes themselves — admin UI only needs to
+    # know "is it set" + provide a write-only field to (re)set it.
+    reception_password_set: bool = False
+    scanner_password_set: bool = False
     updated_at: datetime
 
     class Config:
@@ -40,6 +44,42 @@ class SteamSettingsUpdate(BaseModel):
     resend_from_email: Optional[str] = None
     resend_reply_to: Optional[str] = None
     public_url: Optional[str] = None
+    # Plaintext on the wire (HTTPS-only). Empty string = clear (disable that SPA
+    # until a new password is set); non-empty = hash + store.
+    reception_password: Optional[str] = Field(default=None, description="Plaintext; server hashes")
+    scanner_password: Optional[str] = Field(default=None, description="Plaintext; server hashes")
+
+
+class PasswordLoginRequest(BaseModel):
+    password: str
+
+
+class PasswordLoginResponse(BaseModel):
+    token: str
+
+
+# ---------------------------------------------------------------------------
+# Per-day overrides
+# ---------------------------------------------------------------------------
+
+class SteamDayOverrideRead(BaseModel):
+    day: date
+    max_steam_per_guest: Optional[int] = None
+    max_massage_per_guest: Optional[int] = None
+    note: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SteamDayOverrideUpsert(BaseModel):
+    """PUT body. Any field omitted or set to null clears that override
+    (so that day falls back to the global default for that service)."""
+    max_steam_per_guest: Optional[int] = Field(default=None, ge=1, le=20)
+    max_massage_per_guest: Optional[int] = Field(default=None, ge=1, le=50)
+    note: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +314,12 @@ class BookingResendRequest(BaseModel):
     email: EmailStr
 
 
+class WalkinCreateRequest(BaseModel):
+    slot_id: UUID
+    name: str = Field(min_length=1, max_length=120)
+    email: Optional[str] = None  # plain str (not EmailStr) — empty allowed
+
+
 class BookingCancelResponse(BaseModel):
     id: UUID
     code: str
@@ -308,30 +354,8 @@ class ExpireResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Staff (door scanner) + QR verify
+# Door scanner — QR verify (auth via shared password, see steam_role_auth)
 # ---------------------------------------------------------------------------
-
-class StaffCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-
-
-class StaffAdminRead(BaseModel):
-    id: UUID
-    name: str
-    status: str
-    has_active_session: bool
-    last_seen_at: Optional[datetime] = None
-    activation_token: Optional[str] = None  # only set on create/reissue
-    activation_url: Optional[str] = None
-    created_at: datetime
-
-
-class StaffActivateResponse(BaseModel):
-    id: UUID
-    name: str
-    session_token: str
-    session_expires_at: datetime
-
 
 class StaffVerifyRequest(BaseModel):
     qr_token: UUID
@@ -359,7 +383,3 @@ class StaffVerifyResponse(BaseModel):
     guest_email: Optional[str] = None
     entered_at: Optional[datetime] = None
     entry_opens_at: Optional[datetime] = None  # only set on wrong_time:too_early
-
-
-class CleanupResult(BaseModel):
-    cleared: int

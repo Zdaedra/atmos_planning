@@ -1,5 +1,5 @@
 // Global fetch interceptor:
-//  1. Attaches `Authorization: Bearer <token>` to every request to api.trypranaextract.com
+//  1. Attaches `Authorization: Bearer <token>` to every request to api.atmos-steam.com
 //     (except /auth/login). Bounces to "/" on 401 so a stale token doesn't leave the
 //     user on an empty-looking page.
 //  2. Auto-appends `?department=<current>` so every backend query is scoped to the
@@ -7,7 +7,7 @@
 //
 // Imported once from main.tsx — must run before any component-level fetch().
 
-const API_HOST = "api.trypranaextract.com";
+const API_HOST = "api.atmos-steam.com";
 const DEPT_STORAGE_KEY = "atmos.department";
 
 // Endpoints that operate on data that does NOT belong to a department

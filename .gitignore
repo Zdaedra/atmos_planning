@@ -94,4 +94,5 @@ debug_*.png
 # --- Local-only screenshots/captures from review sessions ---
 .playwright-mcp/
 /steam-*.png
-/v[0-9]-*.png
+/v[0-9]*-*.png
+/guest-*.png

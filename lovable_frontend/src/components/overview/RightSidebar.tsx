@@ -22,7 +22,7 @@ interface FeedResponse {
 
 async function fetchFeed(dateKey: string): Promise<FeedResponse> {
   const token = localStorage.getItem("access_token");
-  const res = await fetch(`https://api.trypranaextract.com/ai/review-feed?date=${dateKey}`, {
+  const res = await fetch(`https://api.atmos-steam.com/ai/review-feed?date=${dateKey}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error("Failed to load alerts");

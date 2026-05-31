@@ -29,7 +29,7 @@ interface FeedResponse {
 
 const fetchReviewFeed = async (date: string): Promise<FeedResponse> => {
     const token = localStorage.getItem("access_token");
-    const res = await fetch(`https://api.trypranaextract.com/ai/review-feed?date=${date}`, {
+    const res = await fetch(`https://api.atmos-steam.com/ai/review-feed?date=${date}`, {
         headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error("Failed to fetch review feed");
@@ -38,7 +38,7 @@ const fetchReviewFeed = async (date: string): Promise<FeedResponse> => {
 
 const generateInsights = async () => {
     const token = localStorage.getItem("access_token");
-    const res = await fetch(`https://api.trypranaextract.com/ai/insights`, {
+    const res = await fetch(`https://api.atmos-steam.com/ai/insights`, {
         headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error("Failed to generate insights");

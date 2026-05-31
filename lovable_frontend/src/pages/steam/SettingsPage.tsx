@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Save, Mail, MailX } from "lucide-react";
+import { Save, Mail, MailX, KeyRound, CheckCircle2, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +26,12 @@ export default function SettingsPage() {
   });
 
   const [form, setForm] = useState<Partial<SteamSettings>>({});
+  // Password fields are write-only — never hydrated from server. Empty = "leave
+  // alone"; non-empty = set to this; explicit "(clear)" toggle = send empty string.
+  const [receptionPw, setReceptionPw] = useState("");
+  const [scannerPw, setScannerPw] = useState("");
+  const [clearReceptionPw, setClearReceptionPw] = useState(false);
+  const [clearScannerPw, setClearScannerPw] = useState(false);
 
   // Hydrate form when settings load (only if user hasn't started editing)
   useEffect(() => {
@@ -35,8 +41,10 @@ export default function SettingsPage() {
   const saveM = useMutation({
     mutationFn: () => {
       const payload: any = { ...form };
-      // strip read-only
+      // strip read-only / display-only fields
       delete payload.updated_at;
+      delete payload.reception_password_set;
+      delete payload.scanner_password_set;
       // null-out empty strings for nullable text fields
       ["resend_from_email", "resend_reply_to", "public_url"].forEach((k) => {
         if (payload[k] === "") payload[k] = null;
@@ -47,10 +55,20 @@ export default function SettingsPage() {
           payload[k] = parseInt(payload[k] as any, 10);
         }
       });
+      // Passwords — three states:
+      //   "clear" toggle on   → send "" (server clears the hash)
+      //   non-empty input     → send the plaintext (server hashes)
+      //   neither             → omit (server leaves alone)
+      if (clearReceptionPw) payload.reception_password = "";
+      else if (receptionPw.trim()) payload.reception_password = receptionPw.trim();
+      if (clearScannerPw) payload.scanner_password = "";
+      else if (scannerPw.trim()) payload.scanner_password = scannerPw.trim();
       return updateSettings(payload);
     },
     onSuccess: () => {
       toast.success("Settings saved");
+      setReceptionPw(""); setScannerPw("");
+      setClearReceptionPw(false); setClearScannerPw(false);
       queryClient.invalidateQueries({ queryKey: ["steam-settings"] });
     },
     onError: (e) => toast.error(apiErrorMessage(e, "Save failed")),
@@ -107,16 +125,12 @@ export default function SettingsPage() {
         <Separator />
 
         <div>
-          <h2 className="font-medium mb-3">Limits & timing</h2>
+          <h2 className="font-medium mb-1">Timing</h2>
+          <p className="text-xs text-muted-foreground mb-3">
+            Per-guest booking limits live on <strong>Schedule → Calendar → day pane</strong>
+            (per-date override). Slot capacity lives on the slot/template itself.
+          </p>
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label>Max steam bookings per guest</Label>
-              <Input type="number" value={num("max_bookings_per_guest")} onChange={(e) => set("max_bookings_per_guest", parseInt(e.target.value || "0", 10) as any)} />
-            </div>
-            <div>
-              <Label>Max massage bookings per guest</Label>
-              <Input type="number" value={num("max_massage_bookings_per_guest")} onChange={(e) => set("max_massage_bookings_per_guest", parseInt(e.target.value || "0", 10) as any)} />
-            </div>
             <div>
               <Label>Booking window (min)</Label>
               <Input type="number" value={num("booking_window_minutes")} onChange={(e) => set("booking_window_minutes", parseInt(e.target.value || "0", 10) as any)} />
@@ -161,12 +175,90 @@ export default function SettingsPage() {
 
         <Separator />
 
+        <div>
+          <h2 className="font-medium mb-1 flex items-center gap-2">
+            <KeyRound className="w-4 h-4" />Tablet passwords
+          </h2>
+          <p className="text-xs text-muted-foreground mb-3">
+            One shared password per role unlocks the tablet SPA forever. Set it once per deploy,
+            tablets enter it once. Changing the password makes every tablet on that role re-enter it
+            on next request.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <PasswordField
+              label="Reception password"
+              isSet={!!settings.reception_password_set}
+              value={receptionPw}
+              onChange={setReceptionPw}
+              clear={clearReceptionPw}
+              onClearToggle={setClearReceptionPw}
+              urlHint="reception.atmos-steam.com"
+            />
+            <PasswordField
+              label="Scanner password"
+              isSet={!!settings.scanner_password_set}
+              value={scannerPw}
+              onChange={setScannerPw}
+              clear={clearScannerPw}
+              onClearToggle={setClearScannerPw}
+              urlHint="book.atmos-steam.com/staff"
+            />
+          </div>
+        </div>
+
+        <Separator />
+
         <div className="flex justify-end">
           <Button onClick={() => saveM.mutate()} disabled={saveM.isPending}>
             <Save className="w-4 h-4 mr-1" />Save changes
           </Button>
         </div>
       </Card>
+    </div>
+  );
+}
+
+function PasswordField({
+  label, isSet, value, onChange, clear, onClearToggle, urlHint,
+}: {
+  label: string;
+  isSet: boolean;
+  value: string;
+  onChange: (v: string) => void;
+  clear: boolean;
+  onClearToggle: (v: boolean) => void;
+  urlHint: string;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <Label>{label}</Label>
+        <span className={`inline-flex items-center gap-1 text-[11px] uppercase tracking-widest ${
+          isSet ? "text-green-700" : "text-yellow-700"
+        }`}>
+          {isSet ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+          {isSet ? "Set" : "Not set"}
+        </span>
+      </div>
+      <Input
+        type="password"
+        autoComplete="new-password"
+        value={clear ? "" : value}
+        disabled={clear}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={isSet ? "Enter a new password to replace" : "Pick a password"}
+      />
+      <p className="text-xs text-muted-foreground mt-1">URL: {urlHint}</p>
+      {isSet && (
+        <label className="flex items-center gap-2 text-xs text-muted-foreground mt-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={clear}
+            onChange={(e) => onClearToggle(e.target.checked)}
+          />
+          Clear password (disables this SPA until a new one is set)
+        </label>
+      )}
     </div>
   );
 }

@@ -174,7 +174,7 @@ export default function TasksPage() {
             if (window.confirm("Clear all assignments (assignees and dates) for ALL upcoming tasks? This cannot be undone.")) {
               const token = localStorage.getItem('access_token');
               try {
-                await fetch(`https://api.trypranaextract.com/tasks/templates/unassign-all-global`, {
+                await fetch(`https://api.atmos-steam.com/tasks/templates/unassign-all-global`, {
                   method: "POST",
                   headers: { "Authorization": `Bearer ${token}` }
                 });

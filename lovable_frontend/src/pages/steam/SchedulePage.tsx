@@ -11,15 +11,18 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
+import { Calendar } from "@/components/ui/calendar";
 import {
   CreateSlotPayload,
   CreateTemplatePayload,
+  DayLimits,
   ServiceType,
   Slot,
   SlotTemplate,
   apiErrorMessage,
   createSlot,
   createTemplate,
+  deleteDayOverride,
   deleteSlot,
   deleteTemplate,
   fetchAdminBookings,
@@ -30,6 +33,7 @@ import {
   previewTemplateDates,
   updateSlot,
   updateTemplate,
+  upsertDayOverride,
 } from "@/lib/steam";
 import { LOCATION_TZ, fmtDateLong, fmtDateTime, fmtTime, isoToLocalInput, localInputToIso } from "@/lib/tz";
 import { BookingDetailsDrawer } from "@/components/steam/BookingDetailsDrawer";
@@ -775,20 +779,586 @@ function CronStatusChip() {
   );
 }
 
+// ===========================================================================
+// Calendar tab — Google-Calendar-style month view + click-to-add-session
+// ===========================================================================
+
+interface AddSessionForm {
+  service_type: ServiceType;
+  start_time: string;          // HH:MM
+  duration_minutes: number;
+  capacity: number;
+  therapist: string;
+  room: string;
+  variant: string;
+  recurrence: "once" | "daily" | "weekdays" | "weekly";
+  weekdays: number[];          // for "weekly"
+  until: string;               // YYYY-MM-DD, optional
+}
+
+function defaultSessionForm(date: Date): AddSessionForm {
+  return {
+    service_type: "steam",
+    start_time: "18:00",
+    duration_minutes: 60,
+    capacity: 6,
+    therapist: "",
+    room: "",
+    variant: "",
+    recurrence: "once",
+    weekdays: [date.getDay() === 0 ? 7 : date.getDay()],  // ISO weekday from JS day
+    until: "",
+  };
+}
+
+function localDateKey(d: Date): string {
+  // YYYY-MM-DD in local calendar (Bali) — what react-day-picker gives us.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function AddSessionDialog({
+  open,
+  onOpenChange,
+  date,
+}: {
+  open: boolean;
+  onOpenChange: (b: boolean) => void;
+  date: Date | null;
+}) {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState<AddSessionForm>(() => defaultSessionForm(date ?? new Date()));
+
+  useEffect(() => {
+    if (date) setForm(defaultSessionForm(date));
+  }, [date?.toISOString()]);
+
+  const set = <K extends keyof AddSessionForm>(k: K, v: AddSessionForm[K]) =>
+    setForm((f) => ({ ...f, [k]: v }));
+
+  const toggleWd = (iso: number) =>
+    setForm((f) => ({
+      ...f,
+      weekdays: f.weekdays.includes(iso)
+        ? f.weekdays.filter((d) => d !== iso)
+        : [...f.weekdays, iso].sort(),
+    }));
+
+  const mut = useMutation({
+    mutationFn: async () => {
+      if (!date) throw new Error("No date selected");
+      const dateKey = localDateKey(date);
+
+      if (form.recurrence === "once") {
+        // Build a starts_at/ends_at in Bali tz from date + start_time.
+        const startsAt = localInputToIso(`${dateKey}T${form.start_time}`);
+        const endsAtDate = new Date(new Date(startsAt).getTime() + form.duration_minutes * 60_000);
+        const payload: CreateSlotPayload = {
+          service_type: form.service_type,
+          starts_at: startsAt,
+          ends_at: endsAtDate.toISOString(),
+          capacity: form.capacity,
+          therapist: form.therapist.trim() || null,
+          room: form.room.trim() || null,
+          variant: form.variant.trim() || null,
+        };
+        return createSlot(payload);
+      }
+
+      // Recurring → create template
+      const days =
+        form.recurrence === "daily"   ? [1, 2, 3, 4, 5, 6, 7] :
+        form.recurrence === "weekdays"? [1, 2, 3, 4, 5] :
+        form.weekdays;
+
+      const tplPayload: CreateTemplatePayload = {
+        name: null,
+        service_type: form.service_type,
+        days_of_week: days,
+        start_time: `${form.start_time}:00`,
+        duration_minutes: form.duration_minutes,
+        capacity: form.capacity,
+        starts_on: dateKey,
+        repeats_until: form.until || null,
+        therapist: form.therapist.trim() || null,
+        room: form.room.trim() || null,
+        variant: form.variant.trim() || null,
+      };
+      return createTemplate(tplPayload);
+    },
+    onSuccess: () => {
+      toast.success(form.recurrence === "once" ? "Session added" : "Recurring sessions created");
+      queryClient.invalidateQueries({ queryKey: ["steam-slots-admin"] });
+      queryClient.invalidateQueries({ queryKey: ["steam-templates"] });
+      queryClient.invalidateQueries({ queryKey: ["steam-day"] });
+      onOpenChange(false);
+    },
+    onError: (e) => toast.error(apiErrorMessage(e, "Failed to create")),
+  });
+
+  const submit = () => {
+    if (form.recurrence === "weekly" && form.weekdays.length === 0) {
+      toast.error("Pick at least one weekday");
+      return;
+    }
+    mut.mutate();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>
+            New session — {date?.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <Label>Time</Label>
+              <Input type="time" value={form.start_time} onChange={(e) => set("start_time", e.target.value)} />
+              <p className="text-xs text-muted-foreground mt-1">Bali</p>
+            </div>
+            <div>
+              <Label>Duration (min)</Label>
+              <Input type="number" value={form.duration_minutes} onChange={(e) => set("duration_minutes", parseInt(e.target.value || "0", 10))} />
+            </div>
+            <div>
+              <Label>Capacity</Label>
+              <Input type="number" value={form.capacity} onChange={(e) => set("capacity", parseInt(e.target.value || "0", 10))} />
+            </div>
+          </div>
+
+          <div>
+            <Label>Service</Label>
+            <Select value={form.service_type} onValueChange={(v) => set("service_type", v as ServiceType)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="steam">Steam</SelectItem>
+                <SelectItem value="massage">Massage</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {form.service_type === "massage" && (
+            <div className="grid grid-cols-3 gap-2">
+              <div>
+                <Label>Therapist</Label>
+                <Input value={form.therapist} onChange={(e) => set("therapist", e.target.value)} />
+              </div>
+              <div>
+                <Label>Room</Label>
+                <Input value={form.room} onChange={(e) => set("room", e.target.value)} />
+              </div>
+              <div>
+                <Label>Variant</Label>
+                <Input value={form.variant} onChange={(e) => set("variant", e.target.value)} />
+              </div>
+            </div>
+          )}
+
+          <div className="border-t pt-3">
+            <Label>Repeat</Label>
+            <div className="space-y-1 mt-1">
+              {[
+                { v: "once", l: "One-time (just this date)" },
+                { v: "daily", l: "Every day" },
+                { v: "weekdays", l: "Every weekday (Mon–Fri)" },
+                { v: "weekly", l: "Specific weekdays" },
+              ].map((opt) => (
+                <label key={opt.v} className="flex items-center gap-2 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="recurrence"
+                    checked={form.recurrence === opt.v}
+                    onChange={() => set("recurrence", opt.v as AddSessionForm["recurrence"])}
+                  />
+                  {opt.l}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {form.recurrence === "weekly" && (
+            <div>
+              <Label className="text-xs">On these weekdays</Label>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {ISO_DAYS.map((d) => {
+                  const active = form.weekdays.includes(d.iso);
+                  return (
+                    <button
+                      key={d.iso}
+                      type="button"
+                      onClick={() => toggleWd(d.iso)}
+                      className={`px-3 py-1 rounded text-xs border ${active ? "bg-primary text-primary-foreground border-primary" : "border-border"}`}
+                    >
+                      {d.short}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {form.recurrence !== "once" && (
+            <div>
+              <Label>Until (optional)</Label>
+              <Input type="date" value={form.until} onChange={(e) => set("until", e.target.value)} />
+              <p className="text-xs text-muted-foreground mt-1">Leave empty for no end</p>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={submit} disabled={mut.isPending}>
+            {mut.isPending ? "Creating…" : form.recurrence === "once" ? "Add session" : "Add recurring"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Per-guest booking-limit override for a single day.
+ *
+ * The user can lift or lower the steam/massage limit for *this date only*
+ * (e.g. festival day → 4 sessions; quiet day → 1). Empty = revert to the
+ * global default in Settings. Saved values flow into the guest UI banner
+ * via /steam/settings/public (for today) and gate the booking transaction
+ * on POST /steam/bookings for the slot's Bali date.
+ */
+function DayLimitsCard({ dateKey, limits }: { dateKey: string; limits: DayLimits }) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [steamVal, setSteamVal] = useState<string>(limits.steam.override?.toString() ?? "");
+  const [massageVal, setMassageVal] = useState<string>(limits.massage.override?.toString() ?? "");
+
+  // Reset local form state whenever the day or backend values change.
+  useEffect(() => {
+    setSteamVal(limits.steam.override?.toString() ?? "");
+    setMassageVal(limits.massage.override?.toString() ?? "");
+  }, [limits.steam.override, limits.massage.override, dateKey]);
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["steam-day", dateKey] });
+
+  const saveM = useMutation({
+    mutationFn: () => {
+      const parse = (s: string) => {
+        const t = s.trim();
+        if (!t) return null;
+        const n = parseInt(t, 10);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+      return upsertDayOverride(dateKey, {
+        max_steam_per_guest:   parse(steamVal),
+        max_massage_per_guest: parse(massageVal),
+      });
+    },
+    onSuccess: () => {
+      toast.success("Day limit saved");
+      setEditing(false);
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["public-settings"] });
+    },
+    onError: (e) => toast.error(apiErrorMessage(e, "Save failed")),
+  });
+
+  const clearM = useMutation({
+    mutationFn: () => deleteDayOverride(dateKey),
+    onSuccess: () => {
+      toast.success("Back to default for this day");
+      setEditing(false);
+      invalidate();
+    },
+    onError: (e) => toast.error(apiErrorMessage(e, "Clear failed")),
+  });
+
+  const hasOverride = limits.steam.override !== null || limits.massage.override !== null;
+
+  if (!editing) {
+    return (
+      <Card className="p-3 mb-3 flex items-center gap-3 flex-wrap">
+        <div className="text-xs uppercase tracking-widest text-muted-foreground">Per-guest limit</div>
+        <LimitChip label="Steam" info={limits.steam} />
+        <LimitChip label="Massage" info={limits.massage} />
+        <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setEditing(true)}>
+          <Pencil className="w-3.5 h-3.5 mr-1" />Edit
+        </Button>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="p-3 mb-3 space-y-3">
+      <div className="text-xs uppercase tracking-widest text-muted-foreground">
+        Per-guest limit · this day only
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label className="text-xs">Steam <span className="text-muted-foreground">(default {limits.steam.default})</span></Label>
+          <Input
+            type="number" min={1} max={20}
+            value={steamVal}
+            onChange={(e) => setSteamVal(e.target.value)}
+            placeholder={`${limits.steam.default}`}
+            className="mt-1"
+          />
+        </div>
+        <div>
+          <Label className="text-xs">Massage <span className="text-muted-foreground">(default {limits.massage.default})</span></Label>
+          <Input
+            type="number" min={1} max={50}
+            value={massageVal}
+            onChange={(e) => setMassageVal(e.target.value)}
+            placeholder={`${limits.massage.default}`}
+            className="mt-1"
+          />
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Leave empty to use the global default. Lifts/lowers the per-guest cap for this Bali date only;
+        the guest UI banner reflects this immediately if it's today.
+      </p>
+      <div className="flex gap-2 justify-end">
+        {hasOverride && (
+          <Button size="sm" variant="ghost" onClick={() => clearM.mutate()} disabled={clearM.isPending}>
+            Reset to default
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
+        <Button size="sm" onClick={() => saveM.mutate()} disabled={saveM.isPending}>
+          {saveM.isPending ? "Saving…" : "Save"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function LimitChip({ label, info }: { label: string; info: { effective: number; default: number; override: number | null } }) {
+  const isOverridden = info.override !== null && info.override !== info.default;
+  return (
+    <span className="inline-flex items-center gap-1 text-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium tabular-nums">{info.effective}</span>
+      {isOverridden && (
+        <Badge variant="secondary" className="text-[10px] uppercase tracking-widest">
+          override
+        </Badge>
+      )}
+    </span>
+  );
+}
+
+function DayInlinePane({
+  date,
+  service,
+  onAddSession,
+  onOpenBooking,
+  onEditSlot,
+}: {
+  date: Date;
+  service?: "steam" | "massage";
+  onAddSession: () => void;
+  onOpenBooking: (id: string) => void;
+  onEditSlot: (s: Slot) => void;
+}) {
+  const dateKey = localDateKey(date);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["steam-day", dateKey, service],
+    queryFn: async () => {
+      const { fetchDay } = await import("@/lib/steam");
+      return fetchDay(dateKey, service);
+    },
+  });
+
+  const baliToday = todayIsoInTz();
+  const isToday = dateKey === baliToday;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+        <div>
+          <h3 className="text-lg font-semibold">
+            {date.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+            {isToday && <span className="ml-2 text-xs font-normal text-green-700">· Today (Bali)</span>}
+          </h3>
+          <p className="text-[11px] uppercase tracking-widest text-muted-foreground mt-0.5">
+            All times in Bali (Asia/Makassar)
+          </p>
+        </div>
+        <Button onClick={onAddSession} size="sm">
+          <Plus className="w-4 h-4 mr-1" />Add session
+        </Button>
+      </div>
+
+      {data?.limits && <DayLimitsCard dateKey={dateKey} limits={data.limits} />}
+
+      {isLoading && <div className="text-sm text-muted-foreground">Loading…</div>}
+
+      {data && data.slots.length === 0 && (
+        <Card className="p-6 text-center text-sm text-muted-foreground">
+          No sessions for this day.
+        </Card>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {data?.slots.map((slot) => (
+          <Card key={slot.id} className="p-3">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="font-medium tabular-nums">{fmtTime(slot.starts_at)}</span>
+              <Badge variant={slot.service_type === "steam" ? "default" : "secondary"}>{slot.service_type}</Badge>
+              <span className="text-xs text-muted-foreground ml-auto">{slot.booked_count}/{slot.capacity}</span>
+              {slot.status === "closed" && <Badge variant="outline">closed</Badge>}
+            </div>
+            {(slot.therapist || slot.variant) && (
+              <div className="text-xs text-muted-foreground mb-2">
+                {slot.therapist}{slot.therapist && slot.variant ? " · " : ""}{slot.variant}
+              </div>
+            )}
+            {slot.bookings.length > 0 && (
+              <div className="space-y-1 mt-2 border-t pt-2">
+                {slot.bookings.map((b) => (
+                  <button
+                    key={b.id}
+                    onClick={() => onOpenBooking(b.id)}
+                    className="w-full text-left text-xs flex items-center justify-between gap-2 p-1 hover:bg-muted/50 rounded"
+                  >
+                    <span className="truncate flex-1">{b.guest_name ?? b.guest_email}</span>
+                    <code className="text-xs font-mono text-muted-foreground">{b.code}</code>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={() => onEditSlot({
+                ...slot,
+                template_id: slot.template_id,
+                is_override: slot.is_override,
+                created_at: slot.starts_at,
+                updated_at: slot.starts_at,
+              } as unknown as Slot)}
+              className="text-xs text-muted-foreground hover:text-foreground mt-2 underline"
+            >
+              Edit slot
+            </button>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Date whose browser-local Y/M/D matches the Bali wall-clock date right now.
+// `localDateKey(d)` reads d.getFullYear/Month/Date, so this is what makes the
+// admin calendar default to Bali "today" — not the admin's laptop "today",
+// which may differ by up to a day. Without this, a manager in (e.g.) Mexico
+// sees their tomorrow highlighted and adds a slot that's already in the past
+// on the Bali server.
+function baliTodayAsLocalDate(): Date {
+  const key = todayIsoInTz();
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function CalendarTab() {
+  const [selected, setSelected] = useState<Date>(() => baliTodayAsLocalDate());
+  const [serviceFilter, setServiceFilter] = useState<"steam" | "massage">("steam");
+  const [addOpen, setAddOpen] = useState(false);
+  const [openBookingId, setOpenBookingId] = useState<string | null>(null);
+  const [editSlotState, setEditSlotState] = useState<Slot | null>(null);
+
+  const now = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString();
+  const to = new Date(now.getFullYear(), now.getMonth() + 3, 1).toISOString();
+
+  const { data: slots = [] } = useQuery({
+    queryKey: ["steam-slots-admin", "calendar", from, to, serviceFilter],
+    queryFn: () => fetchAdminSlots({ from, to, service: serviceFilter }),
+  });
+
+  const slotCounts: Record<string, number> = {};
+  slots.forEach((s) => {
+    if (s.status !== "open") return;
+    const key = new Intl.DateTimeFormat("en-CA", {
+      timeZone: LOCATION_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(new Date(s.starts_at));
+    slotCounts[key] = (slotCounts[key] ?? 0) + 1;
+  });
+
+  return (
+    <div>
+      <div className="flex gap-2 mb-4">
+        <Button
+          size="sm"
+          variant={serviceFilter === "steam" ? "default" : "outline"}
+          onClick={() => setServiceFilter("steam")}
+        >Steam</Button>
+        <Button
+          size="sm"
+          variant={serviceFilter === "massage" ? "default" : "outline"}
+          onClick={() => setServiceFilter("massage")}
+        >Massage</Button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[auto_1fr] gap-6">
+        <div className="flex flex-col items-center">
+          <Calendar
+            mode="single"
+            selected={selected}
+            onSelect={(d) => { if (d) setSelected(d); }}
+            taskCounts={slotCounts}
+            weekStartsOn={1}
+          />
+        </div>
+        <div className="border-l lg:pl-6 lg:border-l-border">
+          <DayInlinePane
+            key={`${localDateKey(selected)}-${serviceFilter}`}
+            date={selected}
+            service={serviceFilter}
+            onAddSession={() => setAddOpen(true)}
+            onOpenBooking={(id) => setOpenBookingId(id)}
+            onEditSlot={(s) => setEditSlotState(s)}
+          />
+        </div>
+      </div>
+
+      <AddSessionDialog open={addOpen} onOpenChange={setAddOpen} date={selected} />
+      <BookingDetailsDrawer bookingId={openBookingId} onClose={() => setOpenBookingId(null)} />
+      {editSlotState && (
+        <SlotEditDialog
+          key={editSlotState.id}
+          slot={editSlotState}
+          open={!!editSlotState}
+          onOpenChange={(o) => { if (!o) setEditSlotState(null); }}
+          onOpenBooking={(id) => setOpenBookingId(id)}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function SchedulePage() {
   // Controlled tabs so we can jump to Slots after a successful template create.
-  const [activeTab, setActiveTab] = useState<"templates" | "slots">("templates");
+  const [activeTab, setActiveTab] = useState<"calendar" | "templates" | "slots">("calendar");
   return (
     <div className="p-6 max-w-6xl mx-auto">
       <div className="flex items-baseline justify-between mb-2">
         <h1 className="text-2xl font-semibold">Schedule</h1>
       </div>
       <div className="mb-6"><CronStatusChip /></div>
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "templates" | "slots")}>
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "calendar" | "templates" | "slots")}>
         <TabsList>
+          <TabsTrigger value="calendar">Calendar</TabsTrigger>
           <TabsTrigger value="templates">Templates</TabsTrigger>
           <TabsTrigger value="slots">Slots</TabsTrigger>
         </TabsList>
+        <TabsContent value="calendar" className="mt-4"><CalendarTab /></TabsContent>
         <TabsContent value="templates" className="mt-4">
           <TemplatesTab onTemplateCreated={() => setActiveTab("slots")} />
         </TabsContent>

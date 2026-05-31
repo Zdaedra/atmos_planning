@@ -1,4 +1,4 @@
-const API_URL = "https://api.trypranaextract.com";
+const API_URL = "https://api.atmos-steam.com";
 
 export const getAuthToken = () => localStorage.getItem("access_token");
 

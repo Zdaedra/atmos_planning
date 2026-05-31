@@ -59,7 +59,7 @@ export default function CalendarPage() {
     queryFn: async () => {
       const startD = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toISOString().split('T')[0];
       const endD = new Date(new Date().getFullYear(), new Date().getMonth() + 2, 0).toISOString().split('T')[0];
-      const res = await fetch(`https://api.trypranaextract.com/tasks/calendar?start_date=${startD}&end_date=${endD}`);
+      const res = await fetch(`https://api.atmos-steam.com/tasks/calendar?start_date=${startD}&end_date=${endD}`);
       if (!res.ok) return {};
       return res.json();
     }
@@ -243,7 +243,7 @@ export default function CalendarPage() {
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const token = localStorage.getItem('access_token');
-                                  fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                                  fetch(`https://api.atmos-steam.com/tasks/templates/${t.id}`, {
                                     method: "PUT",
                                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                                     body: JSON.stringify({
@@ -393,7 +393,7 @@ export default function CalendarPage() {
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const token = localStorage.getItem('access_token');
-                                  fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                                  fetch(`https://api.atmos-steam.com/tasks/templates/${t.id}`, {
                                     method: "PUT",
                                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                                     body: JSON.stringify({
@@ -507,7 +507,7 @@ export default function CalendarPage() {
                         next_execution_date: format(selectedDate, 'yyyy-MM-dd') + "T00:00:00Z"
                       };
 
-                      fetch(`https://api.trypranaextract.com/tasks/templates/${taskToAssign.id}`, {
+                      fetch(`https://api.atmos-steam.com/tasks/templates/${taskToAssign.id}`, {
                         method: "PUT",
                         headers: {
                           "Content-Type": "application/json",
@@ -589,7 +589,7 @@ export default function CalendarPage() {
                         next_execution_date: format(selectedDate, 'yyyy-MM-dd') + "T00:00:00Z"
                       };
 
-                      fetch("https://api.trypranaextract.com/tasks/templates/", {
+                      fetch("https://api.atmos-steam.com/tasks/templates/", {
                         method: "POST",
                         headers: {
                           "Content-Type": "application/json",
@@ -633,7 +633,7 @@ export default function CalendarPage() {
                 const promises = assignTpls.map(tplId => {
                   const t = templates.find((ut: any) => ut.id.toString() === tplId);
                   if (!t) return Promise.resolve();
-                  return fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                  return fetch(`https://api.atmos-steam.com/tasks/templates/${t.id}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                     body: JSON.stringify({
@@ -663,7 +663,7 @@ export default function CalendarPage() {
                 const promises = assignTpls.map(tplId => {
                   const t = templates.find((ut: any) => ut.id.toString() === tplId);
                   if (!t) return Promise.resolve();
-                  return fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                  return fetch(`https://api.atmos-steam.com/tasks/templates/${t.id}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                     body: JSON.stringify({
@@ -808,7 +808,7 @@ export default function CalendarPage() {
                                               if (!date) return;
                                               const token = localStorage.getItem('access_token');
                                               try {
-                                                await fetch(`https://api.trypranaextract.com/tasks/templates/${t.id}`, {
+                                                await fetch(`https://api.atmos-steam.com/tasks/templates/${t.id}`, {
                                                   method: "PUT",
                                                   headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
                                                   body: JSON.stringify({

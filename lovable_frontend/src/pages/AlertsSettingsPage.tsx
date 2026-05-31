@@ -20,7 +20,7 @@ interface SettingsResponse {
 
 async function fetchSettings(): Promise<SettingsResponse> {
     const token = localStorage.getItem("access_token");
-    const res = await fetch("https://api.trypranaextract.com/ai/alerts/settings", {
+    const res = await fetch("https://api.atmos-steam.com/ai/alerts/settings", {
         headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error("Failed to load");
@@ -30,7 +30,7 @@ async function fetchSettings(): Promise<SettingsResponse> {
 async function saveGroup(repeat_type: string, days: number | null) {
     const token = localStorage.getItem("access_token");
     const qs = days === null ? "" : `?overdue_alert_days=${days}`;
-    const res = await fetch(`https://api.trypranaextract.com/ai/alerts/settings/${repeat_type}${qs}`, {
+    const res = await fetch(`https://api.atmos-steam.com/ai/alerts/settings/${repeat_type}${qs}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` },
     });

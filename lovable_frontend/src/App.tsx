@@ -15,8 +15,9 @@ import AiRecommendations from "@/pages/AiRecommendations";
 import AlertsSettingsPage from "@/pages/AlertsSettingsPage";
 import SchedulePage from "@/pages/steam/SchedulePage";
 import BookingsPage from "@/pages/steam/BookingsPage";
-import StaffPage from "@/pages/steam/StaffPage";
 import SteamSettingsPage from "@/pages/steam/SettingsPage";
+import TodayPage from "@/pages/steam/TodayPage";
+import ReceptionPage from "@/pages/steam/ReceptionPage";
 
 const queryClient = new QueryClient();
 
@@ -37,9 +38,14 @@ const App = () => (
             <Route path="/users" element={<Navigate to="/stats" replace />} />
             <Route path="/ai" element={<AiRecommendations />} />
             <Route path="/settings/alerts" element={<AlertsSettingsPage />} />
+            <Route path="/steam/reception" element={<ReceptionPage />} />
+            <Route path="/steam/today" element={<TodayPage />} />
             <Route path="/steam/schedule" element={<SchedulePage />} />
             <Route path="/steam/bookings" element={<BookingsPage />} />
-            <Route path="/steam/staff" element={<StaffPage />} />
+            {/* /steam/staff (magic-link Staff page) removed — tablet auth is now
+                shared-password (Settings → Tablet passwords). Old URL bounces to
+                Settings so any stale bookmarks land somewhere useful. */}
+            <Route path="/steam/staff" element={<Navigate to="/steam/settings" replace />} />
             <Route path="/steam/settings" element={<SteamSettingsPage />} />
           </Route>
           <Route path="*" element={<NotFound />} />
